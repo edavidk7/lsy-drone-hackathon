@@ -1,0 +1,55 @@
+name: Online Competition
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+jobs:
+  online-competition:
+    # Skip this job if running on the main repo to prevent failing CI/CD. Only run on student forks.
+    if: ${{ github.repository != 'learnsyslab/lsy_drone_racing' }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Central Evaluation and Wait
+        env:
+          # The GitHub CLI uses this token to auth with the central repo
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          echo "Dispatching evaluation to central repository..."
+          
+          # 1. Trigger the workflow with inputs
+          gh workflow run competition.yaml \
+            --repo learnsyslab/lsy_drone_racing \
+            --ref competition \
+            -f repository="${{ github.repository }}" \
+            -f sha="${{ github.sha }}" \
+            -f actor="${{ github.actor }}"
+          
+          echo "Waiting 10 seconds for GitHub to queue the run..."
+          sleep 10
+          
+          # 2. Fetch the ID of the run that was just created
+          RUN_ID=$(gh run list \
+            --repo learnsyslab/lsy_drone_racing \
+            --workflow "competition.yaml" \
+            --json databaseId \
+            --jq '.[0].databaseId')
+            
+          if [ -z "$RUN_ID" ]; then
+            echo "❌ Could not find the central workflow run. Check your DISPATCH_TOKEN permissions."
+            exit 1
+          fi
+          
+          echo "✅ Evaluation started! Watching Run ID: $RUN_ID"
+          echo "You can view the live central logs here: https://github.com/learnsyslab/lsy_drone_racing/actions/runs/$RUN_ID"
+          
+          # 3. Watch the run until it finishes. 
+          # The --exit-status flag ensures that if the central evaluation fails, this student job fails too!
+          gh run watch $RUN_ID \
+            --repo learnsyslab/lsy_drone_racing \
+            --exit-status
