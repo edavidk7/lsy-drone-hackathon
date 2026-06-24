@@ -48,10 +48,13 @@ python scripts/evaluate.py --controller <team>.py                        # your 
   generalizes is the actual challenge.
 - The real demo track is **held out**: read gate poses from `obs` at runtime, never hardcode them.
 
-## Submit
+## Real flight & submit
 
-Bring your controller file to your **flight slot** at the event — the organizers run it on the
-real drone for the judges. See [CHALLENGE.md](CHALLENGE.md) for slots, safety, and judging.
+You deploy from **one central machine** in a booked window (you never connect to the drone
+directly), and **two drones are shared** across teams. You can also put up gates to test your own
+layouts. See **[REAL_FLIGHT.md](REAL_FLIGHT.md)** for how deployment works, how to place gates, and
+how to put their exact coordinates into a config. Bring your final controller file to your demo
+slot — the organizers run it for the judges. Judging + rules are in [CHALLENGE.md](CHALLENGE.md).
 
 ## Learn the interface
 
