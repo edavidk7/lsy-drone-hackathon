@@ -32,7 +32,7 @@ sim = [
     "packaging >= 24.0",
     "drone-models",
     "drone-controllers",
-    "crazyflow>=0.1.0",
+    "crazyflow>=0.1.0,<0.2",  # 0.2.0 renamed Sim kwargs: physics->dynamics, drone_model->drone
     "jax >= 0.7",
     "warp-lang",
 ]
