@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 import gymnasium
 import jax.numpy as jp
+import mujoco
 import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 class ShadowSim:
-    """A private env + controller used purely to forward-simulate predicted trajectories."""
+    """A private env + controller used for predictions and ego-camera rendering."""
 
     def __init__(self, config: ConfigDict, controller_file: str = "nav_rl_controller.py"):
         self._config = config
@@ -101,11 +102,68 @@ class ShadowSim:
             gates_visited=set00(data.gates_visited, obs["gates_visited"]),
             obstacles_visited=set00(data.obstacles_visited, obs["obstacles_visited"]),
             target_gate=set00(data.target_gate, obs["target_gate"]),
+            last_drone_pos=set00(data.last_drone_pos, obs["pos"]),
+            disabled_drones=set0(data.disabled_drones, np.zeros(data.disabled_drones.shape[1:], dtype=bool)),
+            marked_for_reset=set0(data.marked_for_reset, False),
+            steps=set0(data.steps, 0),
         )
         self._env.unwrapped.data = data
 
+    def _available_cameras(self) -> list[str]:
+        """List available MuJoCo camera names in the model."""
+        model = self._env.unwrapped.sim.mj_model
+        names: list[str] = []
+        for cam_id in range(int(model.ncam)):
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_id)
+            if name:
+                names.append(str(name))
+        return names
+
+    def _resolve_camera(self, preferred: str = "fpv_cam:0") -> int | str:
+        """Resolve camera name with robust fallbacks."""
+        names = self._available_cameras()
+        if preferred in names:
+            return preferred
+        for fallback in ("fpv_cam:0", "track_cam:0"):
+            if fallback in names:
+                return fallback
+        if names:
+            return names[0]
+        return -1
+
+    def render_ego_frame(
+        self,
+        obs: dict,
+        camera_name: str = "fpv_cam:0",
+        width: int = 640,
+        height: int = 360,
+    ) -> np.ndarray | None:
+        """Render one RGB frame from the requested ego camera."""
+        self._inject(obs)
+        env = self._env.unwrapped
+        try:
+            # Force sync every frame after state injection; otherwise camera can appear frozen.
+            env.data, env.sim.mjx_data = env._render_sync(env.data, env.sim.mjx_data)
+            frame = env.sim.render(
+                mode="rgb_array",
+                camera=self._resolve_camera(camera_name),
+                width=int(width),
+                height=int(height),
+            )
+            if frame is None:
+                return None
+            return np.asarray(frame, dtype=np.uint8)
+        except Exception:  # noqa: BLE001 - video failure must not kill telemetry.
+            logger.warning("Ego-camera render failed", exc_info=True)
+            return None
+
     def predict(
-        self, obs: dict, prev_action: np.ndarray, tick: int | None = None, n_steps: int = 10
+        self,
+        obs: dict,
+        prev_action: np.ndarray,
+        current_action: np.ndarray | None = None,
+        tick: int | None = None,
+        n_steps: int = 10,
     ) -> dict:
         """Inject the observation and roll the controller forward ``n_steps`` env steps.
 
@@ -116,6 +174,9 @@ class ShadowSim:
 
         Returns a dict with predicted positions ``xyz`` (shape (n_steps+1, 3), including the current
         position as the first point) and the predicted ``actions`` (shape (n_steps, act_dim)).
+
+        If ``current_action`` is provided, it is stepped first (representing the already-published
+        live controller command), then subsequent steps use this shadow controller.
         """
         self._inject(obs)
 
@@ -133,8 +194,20 @@ class ShadowSim:
         xyz = [np.asarray(obs["pos"], dtype=np.float32)]
         actions: list[np.ndarray] = []
         obs_k = obs
+        horizon = max(int(n_steps), 0)
+        steps_done = 0
         try:
-            for _ in range(n_steps):
+            if current_action is not None and np.asarray(current_action).size > 0 and horizon > 0:
+                action0 = np.asarray(current_action, dtype=np.float32)
+                actions.append(action0)
+                obs_k, reward, terminated, truncated, info = self._env.step(action0)
+                ctrl.step_callback(action0, obs_k, reward, terminated, truncated, info)
+                xyz.append(np.asarray(obs_k["pos"], dtype=np.float32))
+                steps_done = 1
+                if terminated or truncated:
+                    horizon = steps_done
+
+            for _ in range(steps_done, horizon):
                 action = np.asarray(ctrl.compute_control(obs_k), dtype=np.float32)
                 actions.append(action)
                 obs_k, reward, terminated, truncated, info = self._env.step(action)

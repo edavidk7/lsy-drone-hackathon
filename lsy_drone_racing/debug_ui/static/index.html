@@ -7,57 +7,186 @@
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
   :root {
-    --bg: #0e1117; --panel: #161b22; --border: #232a35; --text: #e6edf3;
-    --muted: #8b949e; --accent: #58a6ff; --pred: #f78166; --gate: #3fb950; --obs: #d29922;
+    --bg: #000;
+    --panel: #000;
+    --border: #fff;
+    --text: #fff;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    letter-spacing: .02em;
   }
   header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
   }
-  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: #6e7681; }
-  .dot.live { background: var(--gate); box-shadow: 0 0 8px var(--gate); }
-  header .meta { color: var(--muted); font-size: 12px; }
-  .layout { display: grid; grid-template-columns: 1fr 320px; gap: 12px; padding: 12px; }
+  header h1 {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid #fff;
+    background: #000;
+  }
+  .dot.live {
+    background: #fff;
+    box-shadow: 0 0 10px #fff;
+  }
+  header .meta {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  .layout { display: grid; grid-template-columns: 1fr 380px; gap: 12px; padding: 12px; }
   .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
-  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 2px 4px 6px; }
-  #traj { height: 460px; } .ts { height: 200px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 10px;
+  }
+  .panel h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    margin: 2px 4px 8px;
+  }
+  #traj { height: 460px; }
+  .ts { height: 200px; }
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
-  .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
-  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .stat .v.small { font-size: 14px; font-weight: 500; }
-  .vec { font-variant-numeric: tabular-nums; color: var(--accent); }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge.flying { background: rgba(63,185,80,.15); color: var(--gate); }
-  .badge.done { background: rgba(210,153,34,.15); color: var(--obs); }
-  table.act { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  table.act td { padding: 3px 6px; border-bottom: 1px solid var(--border); }
-  table.act td.k { color: var(--muted); }
-  table.act td.v { text-align: right; color: var(--accent); }
+  .stat {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 8px 10px;
+  }
+  .stat .k {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  .stat .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .v.small { font-size: 14px; font-weight: 600; }
+  .vec { font-variant-numeric: tabular-nums; color: #fff; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 0;
+    font-size: 12px;
+    font-weight: 700;
+    border: 1px solid #fff;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  .badge.flying { background: #000; color: #fff; }
+  .badge.done { background: #fff; color: #000; }
+  table.act {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+  table.act td {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.act td.k { color: #fff; text-transform: uppercase; }
+  table.act td.v { text-align: right; color: #fff; }
+  .recon-wrap {
+    position: relative;
+    border: 1px solid #fff;
+    background: #000;
+    height: 230px;
+    overflow: hidden;
+  }
+  #recon-feed {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #000;
+  }
+  .recon-no-signal {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    letter-spacing: .16em;
+    font-size: 12px;
+    color: #fff;
+    opacity: .8;
+  }
+  .recon-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 8px;
+    pointer-events: none;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: .09em;
+  }
+  .recon-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .recon-pill {
+    border: 1px solid #fff;
+    padding: 2px 6px;
+    background: rgba(0,0,0,.65);
+  }
 </style>
 </head>
 <body>
 <header>
   <span class="dot" id="status-dot"></span>
-  <h1>Drone Controller Debug UI</h1>
+  <h1>Mission Control</h1>
   <span class="meta" id="meta">waiting for controller…</span>
 </header>
 
 <div class="layout">
   <div class="col">
-    <div class="panel"><h2>Trajectory — history &amp; 200 ms prediction</h2><div id="traj"></div></div>
+    <div class="panel"><h2>Trajectory — history &amp; <span id="pred-horizon-label">prediction</span></h2><div id="traj"></div></div>
     <div class="panel"><h2>Position (m)</h2><div id="pos-ts" class="ts"></div></div>
     <div class="panel"><h2>Action</h2><div id="act-ts" class="ts"></div></div>
   </div>
 
   <div class="col">
+    <div class="panel">
+      <h2>Recon Feed</h2>
+      <div class="recon-wrap">
+        <img id="recon-feed" alt="Drone ego camera" />
+        <div class="recon-no-signal" id="recon-no-signal">No Signal</div>
+        <div class="recon-overlay">
+          <div class="recon-row">
+            <span class="recon-pill">Link <span id="recon-link">offline</span></span>
+            <span class="recon-pill">Mode <span id="recon-mode">–</span></span>
+          </div>
+          <div class="recon-row">
+            <span class="recon-pill">Gate <span id="recon-gate">–</span></span>
+            <span class="recon-pill">Speed <span id="recon-speed">–</span></span>
+            <span class="recon-pill">T <span id="recon-time">0.00 s</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="panel">
       <h2>Status</h2>
       <div class="stat-grid">
@@ -79,11 +208,23 @@
 </div>
 
 <script>
-const PLOT_BG = "#161b22", GRID = "#232a35", FONT = "#8b949e";
+const PLOT_BG = "#000", GRID = "#fff", FONT = "#fff";
+const TRACE = {
+  history: "#00e5ff",
+  prediction: "#ff4d6d",
+  drone: "#ffffff",
+  gates: "#39ff14",
+  obstacles: "#ffb000",
+  posX: "#00e5ff",
+  posY: "#39ff14",
+  posZ: "#ff4d6d",
+  action: ["#00e5ff", "#39ff14", "#ff4d6d", "#ffb000", "#7df9ff", "#ff7b00"],
+};
 const baseLayout = (extra) => Object.assign({
   paper_bgcolor: PLOT_BG, plot_bgcolor: PLOT_BG, font: { color: FONT, size: 11 },
   margin: { l: 44, r: 12, t: 8, b: 32 }, showlegend: true,
   legend: { orientation: "h", y: 1.12, x: 0, font: { size: 10 } },
+  uirevision: "mission-control-live",
 }, extra || {});
 const axis = { gridcolor: GRID, zerolinecolor: GRID, color: FONT };
 
@@ -94,27 +235,40 @@ const ACT_LABELS = {
 
 // --- 3D trajectory ---------------------------------------------------------
 Plotly.newPlot("traj", [
-  { type:"scatter3d", mode:"lines", name:"history", x:[],y:[],z:[], line:{color:"#58a6ff", width:4} },
-  { type:"scatter3d", mode:"lines", name:"prediction (200ms)", x:[],y:[],z:[], line:{color:"#f78166", width:6} },
-  { type:"scatter3d", mode:"markers", name:"drone", x:[],y:[],z:[], marker:{color:"#58a6ff", size:5} },
-  { type:"scatter3d", mode:"markers+text", name:"gates", x:[],y:[],z:[], marker:{color:"#3fb950", size:6, symbol:"square"}, textposition:"top center", textfont:{color:"#3fb950", size:10} },
-  { type:"scatter3d", mode:"markers", name:"obstacles", x:[],y:[],z:[], marker:{color:"#d29922", size:5, symbol:"diamond"} },
+  { type:"scatter3d", mode:"lines", name:"history", x:[],y:[],z:[], line:{color:TRACE.history, width:3} },
+  { type:"scatter3d", mode:"lines", name:"prediction (200ms)", x:[],y:[],z:[], line:{color:TRACE.prediction, width:6, dash:"dot"} },
+  { type:"scatter3d", mode:"markers", name:"drone", x:[],y:[],z:[], marker:{color:TRACE.drone, size:5} },
+  { type:"scatter3d", mode:"markers+text", name:"gates", x:[],y:[],z:[], marker:{color:TRACE.gates, size:6, symbol:"square"}, textposition:"top center", textfont:{color:TRACE.gates, size:10} },
+  { type:"scatter3d", mode:"markers", name:"obstacles", x:[],y:[],z:[], marker:{color:TRACE.obstacles, size:5, symbol:"diamond-open"} },
 ], baseLayout({ scene: {
   xaxis: Object.assign({title:"x"}, axis), yaxis: Object.assign({title:"y"}, axis),
   zaxis: Object.assign({title:"z"}, axis), aspectmode:"data",
   camera:{ eye:{x:1.4,y:1.4,z:1.0} }, bgcolor: PLOT_BG,
-}}), {displayModeBar:false, responsive:true});
+  dragmode: "orbit",
+  uirevision: "mission-control-3d",
+}}), {displayModeBar:true, responsive:true, scrollZoom:true});
 
 Plotly.newPlot("pos-ts", [
-  {mode:"lines", name:"x", x:[],y:[], line:{color:"#58a6ff"}},
-  {mode:"lines", name:"y", x:[],y:[], line:{color:"#3fb950"}},
-  {mode:"lines", name:"z", x:[],y:[], line:{color:"#f78166"}},
+  {mode:"lines", name:"x", x:[],y:[], line:{color:TRACE.posX, width:2}},
+  {mode:"lines", name:"y", x:[],y:[], line:{color:TRACE.posY, width:2, dash:"dot"}},
+  {mode:"lines", name:"z", x:[],y:[], line:{color:TRACE.posZ, width:2, dash:"dash"}},
 ], baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:true});
 
 let actInited = false;
 function initActPlot(n) {
   const labels = ACT_LABELS[n] || Array.from({length:n}, (_,i)=>"a"+i);
-  const traces = labels.map((name)=>({mode:"lines", name, x:[], y:[]}));
+  const dashes = ["solid", "dot", "dash", "dashdot", "longdash", "longdashdot"];
+  const traces = labels.map((name, i)=>({
+    mode:"lines",
+    name,
+    x:[],
+    y:[],
+    line: {
+      color: TRACE.action[i % TRACE.action.length],
+      width: 2,
+      dash: dashes[i % dashes.length],
+    },
+  }));
   Plotly.newPlot("act-ts", traces, baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:true});
   actInited = true;
 }
@@ -122,8 +276,14 @@ function initActPlot(n) {
 // --- live link -------------------------------------------------------------
 const $ = (id)=>document.getElementById(id);
 let frames = 0, lastRateT = performance.now();
+let reconBlobUrl = null;
+let trajInteractUntil = 0;
+let pendingTrajFrame = null;
 setInterval(()=>{ const now=performance.now(); $("s-rate").textContent=Math.round(frames*1000/(now-lastRateT)); frames=0; lastRateT=now; }, 1000);
 const fmt3 = (a)=> "[" + a.map(v=>v.toFixed(2)).join(", ") + "]";
+const setReconLink = (status)=> { $("recon-link").textContent = status; };
+const holdTrajInteraction = ()=> { trajInteractUntil = performance.now() + 500; };
+["mousedown", "wheel", "touchstart"].forEach((evt)=>$("traj").addEventListener(evt, holdTrajInteraction, { passive: true }));
 
 function render(f) {
   frames++;
@@ -132,12 +292,20 @@ function render(f) {
 
   const col = (arr, i)=>arr.map(p=>p[i]);
   const hp = f.history.pos, pr = f.prediction.xyz;
-  Plotly.restyle("traj", { x:[col(hp,0), col(pr,0), [f.current.pos[0]]], y:[col(hp,1), col(pr,1), [f.current.pos[1]]], z:[col(hp,2), col(pr,2), [f.current.pos[2]]] }, [0,1,2]);
-  const gp = f.gates.pos, op = f.obstacles.pos;
-  Plotly.restyle("traj", {
-    x:[col(gp,0), col(op,0)], y:[col(gp,1), col(op,1)], z:[col(gp,2), col(op,2)],
-    text:[gp.map((_,i)=>"G"+i), op.map(()=>"")]
-  }, [3,4]);
+  const now = performance.now();
+  if (now < trajInteractUntil) {
+    pendingTrajFrame = f;
+  } else {
+    const src = pendingTrajFrame || f;
+    pendingTrajFrame = null;
+    const hp2 = src.history.pos, pr2 = src.prediction.xyz;
+    Plotly.restyle("traj", { x:[col(hp2,0), col(pr2,0), [src.current.pos[0]]], y:[col(hp2,1), col(pr2,1), [src.current.pos[1]]], z:[col(hp2,2), col(pr2,2), [src.current.pos[2]]] }, [0,1,2]);
+    const gp = src.gates.pos, op = src.obstacles.pos;
+    Plotly.restyle("traj", {
+      x:[col(gp,0), col(op,0)], y:[col(gp,1), col(op,1)], z:[col(gp,2), col(op,2)],
+      text:[gp.map((_,i)=>"G"+i), op.map(()=>"")]
+    }, [3,4]);
+  }
 
   const ht = f.history.t;
   Plotly.restyle("pos-ts", { x:[ht,ht,ht], y:[col(hp,0),col(hp,1),col(hp,2)] }, [0,1,2]);
@@ -156,6 +324,14 @@ function render(f) {
   $("s-vel").textContent = fmt3(f.current.vel);
   $("s-time").textContent = f.t.toFixed(2) + " s";
   $("s-mode").textContent = f.control_mode;
+  $("recon-mode").textContent = f.control_mode;
+  $("recon-gate").textContent = f.current.target_gate < 0 ? "DONE" : String(f.current.target_gate);
+  $("recon-speed").textContent = f.current.speed.toFixed(2) + " m/s";
+  $("recon-time").textContent = f.t.toFixed(2) + " s";
+  if (f.prediction && Number.isFinite(f.prediction.horizon_s)) {
+    const ms = Math.round(f.prediction.horizon_s * 1000);
+    $("pred-horizon-label").textContent = `${f.prediction.horizon_steps} steps (${ms} ms)`;
+  }
   const done = f.current.target_gate < 0;
   const st = $("s-state"); st.textContent = done ? "FINISHED" : "FLYING";
   st.className = "badge " + (done ? "done" : "flying");
@@ -181,7 +357,34 @@ function connect() {
     ws.close();
   };
 }
+
+function connectVideo() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws/video`);
+  ws.binaryType = "arraybuffer";
+  setReconLink("connecting");
+  ws.onopen = ()=> setReconLink("live");
+  ws.onmessage = (e)=> {
+    if (!(e.data instanceof ArrayBuffer)) return;
+    const blob = new Blob([e.data], { type: "image/jpeg" });
+    const url = URL.createObjectURL(blob);
+    if (reconBlobUrl) URL.revokeObjectURL(reconBlobUrl);
+    reconBlobUrl = url;
+    $("recon-feed").src = url;
+    $("recon-no-signal").style.display = "none";
+  };
+  ws.onclose = ()=> {
+    setReconLink("retry");
+    setTimeout(connectVideo, 1000);
+  };
+  ws.onerror = ()=> {
+    setReconLink("error");
+    ws.close();
+  };
+}
+
 connect();
+connectVideo();
 </script>
 </body>
 </html>

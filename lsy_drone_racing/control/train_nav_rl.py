@@ -79,6 +79,9 @@ class Args:
     progress_obs: bool = False  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
     lookahead_gates: int = 0  # number of upcoming gates (after the target) to include, in the drone body frame
     gravity_obs: bool = False  # append the gravity direction in the drone body frame (attitude/tilt cue)
+    gate_orient_rotmat: bool = True  # gate orientation as a 9-D rotation matrix (True) or a 3-D facing normal (False)
+    vel_body_obs: bool = False  # express velocity in the body frame (True) or the world frame (False)
+    altitude_obs: bool = False  # append the drone's absolute world-z height
     checkpoint_every_iterations: int = 10
     episode_step_limit: int = 1500
 
@@ -253,7 +256,7 @@ def _gate_facing_body(quat_rel: Array) -> Array:
     return rotmat_rel[..., jp.asarray([0, 3, 6])]
 
 
-def _lookahead_gate_features(obs: dict[str, Array], n_lookahead: int) -> Array:
+def _lookahead_gate_features(obs: dict[str, Array], n_lookahead: int, gate_orient_rotmat: bool) -> Array:
     """Body-frame relative position + relative orientation of the next ``n_lookahead`` gates.
 
     The features are egocentric (drone-local), like the target-gate terms, so they are rotation
@@ -261,7 +264,8 @@ def _lookahead_gate_features(obs: dict[str, Array], n_lookahead: int) -> Array:
     so seeing the upcoming gate(s) is what lets it plan a line through the current gate that sets up
     the next one. Gates past the last (no successor) are zeroed; the policy reads all-zeros as "no
     further gate". The upcoming gate's nominal pose is available from t=0 even under a finite
-    sensor_range, so this is real planning information, not a privileged leak.
+    sensor_range, so this is real planning information, not a privileged leak. The orientation
+    representation matches the target gate (``gate_orient_rotmat``): 9-D rotmat or 3-D facing normal.
     """
     target_gate = obs["target_gate"]
     n_gates = obs["gates_pos"].shape[1]
@@ -272,43 +276,55 @@ def _lookahead_gate_features(obs: dict[str, Array], n_lookahead: int) -> Array:
         gate_pos = _gather_by_index(obs["gates_pos"], idx)
         gate_quat = _gather_by_index(obs["gates_quat"], idx)
         delta_body = _rotate_world_to_body(gate_pos - obs["pos"], obs["quat"])
-        facing_body = _gate_facing_body(_quat_multiply(_quat_conjugate(obs["quat"]), gate_quat))
+        quat_rel = _quat_multiply(_quat_conjugate(obs["quat"]), gate_quat)
+        orient = _quat_to_rotmat(quat_rel) if gate_orient_rotmat else _gate_facing_body(quat_rel)
         feats.append(delta_body * valid)
-        feats.append(facing_body * valid)
+        feats.append(orient * valid)
     return jp.concatenate(feats, axis=-1)
 
 
-@partial(jax.jit, static_argnames=("n_nearest_obstacles", "include_progress", "lookahead_gates", "gravity_obs"))
+@partial(jax.jit, static_argnames=("n_nearest_obstacles", "include_progress", "lookahead_gates", "gravity_obs", "gate_orient_rotmat", "vel_body_obs", "altitude_obs"))
 def build_navigation_features(
-    obs: dict[str, Array], n_nearest_obstacles: int, include_progress: bool = False, lookahead_gates: int = 0, gravity_obs: bool = False
+    obs: dict[str, Array],
+    n_nearest_obstacles: int,
+    include_progress: bool = False,
+    lookahead_gates: int = 0,
+    gravity_obs: bool = False,
+    gate_orient_rotmat: bool = True,
+    vel_body_obs: bool = False,
+    altitude_obs: bool = False,
 ) -> Array:
-    """Build a compact navigation observation from the privileged environment state."""
+    """Build a compact navigation observation from the privileged environment state.
+
+    Every structural choice is a toggle so a checkpoint's saved obs layout can be reconstructed
+    exactly. The defaults (rotmat gate orientation, world-frame velocity, no gravity/altitude/
+    lookahead/progress) reproduce the obs=34 known-good baseline.
+    """
     obs = _normalize_obs(obs)
     gate_delta_world, gate_delta_body, gate_quat_rel = _target_gate_metrics(obs)
-    # The target gate's facing normal in the body frame (3-D), not a full 9-D relative rotation: a
-    # gate is a ~1-DOF (yaw) plane, so its pass-through direction is the sufficient, non-redundant cue.
-    gate_facing_body = _gate_facing_body(gate_quat_rel)
+    # Gate orientation: 9-D relative rotation matrix (default) or its 3-D pass-through facing normal.
+    gate_orient = _quat_to_rotmat(gate_quat_rel) if gate_orient_rotmat else _gate_facing_body(gate_quat_rel)
     nearest_obstacles = _nearest_obstacle_features(obs, n_nearest_obstacles)
     # gates_visited is a *sensed* fraction (within sensor_range), not a passed fraction.
     visited_ratio = jp.mean(obs["gates_visited"].astype(jp.float32), axis=-1, keepdims=True)
-    feats = [gate_delta_world, gate_delta_body, gate_facing_body]
+    feats = [gate_delta_world, gate_delta_body, gate_orient]
     if lookahead_gates > 0:
-        feats.append(_lookahead_gate_features(obs, lookahead_gates))
-    # Velocity in the body frame (ang_vel already is), so the drone's motion is expressed egocentrically
-    # and needs no absolute world heading to interpret.
-    vel_body = _rotate_world_to_body(obs["vel"], obs["quat"])
-    feats.extend([vel_body, obs["ang_vel"]])
+        feats.append(_lookahead_gate_features(obs, lookahead_gates, gate_orient_rotmat))
+    # Velocity in the world frame (default) or the body frame (egocentric, ang_vel already is).
+    vel = _rotate_world_to_body(obs["vel"], obs["quat"]) if vel_body_obs else obs["vel"]
+    feats.extend([vel, obs["ang_vel"]])
     if gravity_obs:
         # Gravity direction expressed in the body frame: a compact attitude cue telling the policy
         # which way is down and how tilted it is (the drone's absolute attitude is otherwise only
         # implicit in the gate-relative terms). World down is (0, 0, -1).
         gravity_world = jp.broadcast_to(jp.asarray([0.0, 0.0, -1.0], dtype=obs["pos"].dtype), obs["pos"].shape)
         feats.append(_rotate_world_to_body(gravity_world, obs["quat"]))
-    # Absolute altitude (world z): the one genuinely global cue the egocentric encoding drops. The
-    # symmetry the body frame exploits (yaw + horizontal translation) does not include the vertical
-    # axis (gravity breaks it), so height above the ground - relevant for the z<0 ground crash and the
-    # absolute gate heights - is not recoverable from the gate-relative features alone.
-    feats.append(obs["pos"][..., 2:3])
+    if altitude_obs:
+        # Absolute altitude (world z): the one genuinely global cue the egocentric encoding drops. The
+        # symmetry the body frame exploits (yaw + horizontal translation) does not include the vertical
+        # axis (gravity breaks it), so height above the ground - relevant for the z<0 ground crash and
+        # the absolute gate heights - is not recoverable from the gate-relative features alone.
+        feats.append(obs["pos"][..., 2:3])
     feats.extend([nearest_obstacles, visited_ratio])
     if include_progress:
         # Fraction of gates already passed: target_gate is the index of the gate being flown to (=
@@ -362,21 +378,41 @@ def compute_navigation_reward(
 class NavigationObservation(VectorObservationWrapper):
     """Reduce the full environment observation to a compact navigation feature vector."""
 
-    def __init__(self, env: VectorEnv, n_nearest_obstacles: int = 2, include_progress: bool = False, lookahead_gates: int = 0, gravity_obs: bool = False):
+    def __init__(
+        self,
+        env: VectorEnv,
+        n_nearest_obstacles: int = 2,
+        include_progress: bool = False,
+        lookahead_gates: int = 0,
+        gravity_obs: bool = False,
+        gate_orient_rotmat: bool = True,
+        vel_body_obs: bool = False,
+        altitude_obs: bool = False,
+    ):
         super().__init__(env)
         self.n_nearest_obstacles = n_nearest_obstacles
         self.include_progress = include_progress
         self.lookahead_gates = lookahead_gates
         self.gravity_obs = gravity_obs
-        sample = build_navigation_features(
-            race_obs(env.unwrapped.data), self.n_nearest_obstacles, self.include_progress, self.lookahead_gates, self.gravity_obs
-        )
+        self.gate_orient_rotmat = gate_orient_rotmat
+        self.vel_body_obs = vel_body_obs
+        self.altitude_obs = altitude_obs
+        sample = self.observations(race_obs(env.unwrapped.data))
         feature_dim = int(sample.shape[-1])
         self.single_observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(feature_dim,), dtype=np.float32)
         self.observation_space = batch_space(self.single_observation_space, self.num_envs)
 
     def observations(self, observations: dict[str, Array]) -> Array:
-        return build_navigation_features(observations, self.n_nearest_obstacles, self.include_progress, self.lookahead_gates, self.gravity_obs)
+        return build_navigation_features(
+            observations,
+            self.n_nearest_obstacles,
+            self.include_progress,
+            self.lookahead_gates,
+            self.gravity_obs,
+            self.gate_orient_rotmat,
+            self.vel_body_obs,
+            self.altitude_obs,
+        )
 
 
 class PrevAction(VectorObservationWrapper):
@@ -583,7 +619,14 @@ def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str 
     )
     env = ActionPenalty(env, act_coef=args.act_coef, d_act_main_coef=args.d_act_main_coef, d_act_aux_coef=args.d_act_aux_coef, control_mode=control_mode)
     env = NavigationObservation(
-        env, n_nearest_obstacles=args.n_nearest_obstacles, include_progress=args.progress_obs, lookahead_gates=args.lookahead_gates, gravity_obs=args.gravity_obs
+        env,
+        n_nearest_obstacles=args.n_nearest_obstacles,
+        include_progress=args.progress_obs,
+        lookahead_gates=args.lookahead_gates,
+        gravity_obs=args.gravity_obs,
+        gate_orient_rotmat=args.gate_orient_rotmat,
+        vel_body_obs=args.vel_body_obs,
+        altitude_obs=args.altitude_obs,
     )
     env = PrevAction(env)
     env = JaxToTorch(env, torch_device)

@@ -45,9 +45,12 @@ class NavRLController(Controller):
         act_dim = 4 if self._control_mode == "attitude" else 13
         self._act_dim = act_dim
         self._n_nearest_obstacles = int(getattr(config.controller, "n_nearest_obstacles", 2))
-        self._include_progress = bool(getattr(config.controller, "progress_obs", False))
+        self._include_progress = bool(getattr(config.controller, "progress_obs", Args.progress_obs))
         self._lookahead_gates = int(getattr(config.controller, "lookahead_gates", Args.lookahead_gates))
         self._gravity_obs = bool(getattr(config.controller, "gravity_obs", Args.gravity_obs))
+        self._gate_orient_rotmat = bool(getattr(config.controller, "gate_orient_rotmat", Args.gate_orient_rotmat))
+        self._vel_body_obs = bool(getattr(config.controller, "vel_body_obs", Args.vel_body_obs))
+        self._altitude_obs = bool(getattr(config.controller, "altitude_obs", Args.altitude_obs))
         # Single previous action a_{t-1} appended to the observation (matches train_nav_rl.PrevAction).
         self._prev_action = np.zeros(act_dim, dtype=np.float32)
 
@@ -107,17 +110,22 @@ class NavRLController(Controller):
         args = checkpoint.get("args")
         return args if isinstance(args, dict) else None
 
-    def _feature_flags(self, ckpt_args: dict | None) -> tuple[int, bool, int, bool]:
+    def _feature_flags(self, ckpt_args: dict | None) -> tuple[int, bool, int, bool, bool, bool, bool]:
         """Resolve the observation feature flags, preferring the checkpoint's training args.
 
         Missing keys or explicit ``None`` values fall back to the controller's current settings, so
-        a checkpoint only overrides the flags it actually recorded.
+        a checkpoint only overrides the flags it actually recorded. Older checkpoints that predate a
+        flag therefore reconstruct the obs=34 known-good layout from the controller's defaults
+        (rotmat gate orientation, world-frame velocity, no gravity/altitude/lookahead/progress).
         """
-        n, p, lk, g = (
+        n, p, lk, g, gr, vb, alt = (
             self._n_nearest_obstacles,
             self._include_progress,
             self._lookahead_gates,
             self._gravity_obs,
+            self._gate_orient_rotmat,
+            self._vel_body_obs,
+            self._altitude_obs,
         )
         if ckpt_args:
             if ckpt_args.get("n_nearest_obstacles") is not None:
@@ -128,22 +136,41 @@ class NavRLController(Controller):
                 lk = int(ckpt_args["lookahead_gates"])
             if ckpt_args.get("gravity_obs") is not None:
                 g = bool(ckpt_args["gravity_obs"])
-        return n, p, lk, g
+            if ckpt_args.get("gate_orient_rotmat") is not None:
+                gr = bool(ckpt_args["gate_orient_rotmat"])
+            if ckpt_args.get("vel_body_obs") is not None:
+                vb = bool(ckpt_args["vel_body_obs"])
+            if ckpt_args.get("altitude_obs") is not None:
+                alt = bool(ckpt_args["altitude_obs"])
+        return n, p, lk, g, gr, vb, alt
 
     def _apply_ckpt_args(self, ckpt_args: dict | None) -> None:
         """Adopt the feature flags the checkpoint was trained with."""
-        self._n_nearest_obstacles, self._include_progress, self._lookahead_gates, self._gravity_obs = (
-            self._feature_flags(ckpt_args)
-        )
+        (
+            self._n_nearest_obstacles,
+            self._include_progress,
+            self._lookahead_gates,
+            self._gravity_obs,
+            self._gate_orient_rotmat,
+            self._vel_body_obs,
+            self._altitude_obs,
+        ) = self._feature_flags(ckpt_args)
 
     def _obs_dim_for_ckpt(
         self, obs: dict[str, NDArray[np.floating]], ckpt_args: dict | None, act_dim: int
     ) -> int:
         """Compute the obs dimension implied by a checkpoint's feature flags and the current builder."""
-        n, p, lk, g = self._feature_flags(ckpt_args)
+        n, p, lk, g, gr, vb, alt = self._feature_flags(ckpt_args)
         obs_jax = {k: np.asarray(v)[None, ...] for k, v in obs.items()}
         base = build_navigation_features(
-            obs_jax, n_nearest_obstacles=n, include_progress=p, lookahead_gates=lk, gravity_obs=g
+            obs_jax,
+            n_nearest_obstacles=n,
+            include_progress=p,
+            lookahead_gates=lk,
+            gravity_obs=g,
+            gate_orient_rotmat=gr,
+            vel_body_obs=vb,
+            altitude_obs=alt,
         )
         return int(base.shape[-1]) + act_dim
 
@@ -255,6 +282,9 @@ class NavRLController(Controller):
             include_progress=self._include_progress,
             lookahead_gates=self._lookahead_gates,
             gravity_obs=self._gravity_obs,
+            gate_orient_rotmat=self._gate_orient_rotmat,
+            vel_body_obs=self._vel_body_obs,
+            altitude_obs=self._altitude_obs,
         )
         return np.array(features[0], copy=True, dtype=np.float32)
 
