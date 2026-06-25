@@ -498,7 +498,7 @@ class RaceCoreEnv:
             data = data.replace(sim_data=sim_data)
             data = randomize_track(data, mask, subkey)
             data = _reset_env_data(data, mask)
-            return data, (obs(data), {})
+            return data, (obs(data), info(data))
 
         return reset
 
@@ -523,7 +523,8 @@ class RaceCoreEnv:
             sim_data = sim_step_fn(data.sim_data, n_steps)
             data = data.replace(sim_data=sim_data)
             # 4) Apply environment logic
-            data = _update_disabled_drones(data, contact_check_fn(data))
+            any_contacts, gate_hits, obstacle_hits = contact_check_fn(data)
+            data = _update_disabled_drones(data, any_contacts)
             data = _warp_disabled_drones(data)  # Prevent interference with alive drones
             data = _update_visited_objects(data)
             data = _update_target_gates(data)
@@ -535,13 +536,19 @@ class RaceCoreEnv:
                 data, _ = jax.lax.cond(
                     marked_for_reset.any(),
                     reset_fn,
-                    lambda data, *_: (data, (obs(data), {})),
+                    lambda data, *_: (data, (obs(data), info(data))),
                     data,
                     None,
                     marked_for_reset,
                 )
             _truncated = truncated(data, max_episode_steps)
-            return data, (obs(data), reward(data), terminated(data), _truncated, {})
+            return data, (
+                obs(data),
+                reward(data),
+                terminated(data),
+                _truncated,
+                info(data, gate_hits=gate_hits, obstacle_hits=obstacle_hits),
+            )
 
         return step
 
@@ -569,7 +576,7 @@ class RaceCoreEnv:
 
         return apply_action
 
-    def build_contact_check_fn(self) -> Callable[[EnvData], Array]:
+    def build_contact_check_fn(self) -> Callable[[EnvData], tuple[Array, Array, Array]]:
         """Build a function that checks for contacts between drones and gates/obstacles.
 
         Note:
@@ -582,8 +589,28 @@ class RaceCoreEnv:
         contact_masks = _load_contact_masks(self.sim)
         gate_ids, obstacle_ids = self.mocap_ids
         _mjx_data = self.sim.mjx_data
+        n_contacts = len(self.sim.mjx_data._impl.contact.geom1[0])
+        gate_contact_mask = np.zeros(n_contacts, dtype=bool)
+        obstacle_contact_mask = np.zeros(n_contacts, dtype=bool)
+        geom1, geom2 = self.sim.mjx_data._impl.contact.geom1[0], self.sim.mjx_data._impl.contact.geom2[0]
+        for i in range(self.data.gates_pos.shape[1]):
+            body_id = self.sim.mj_model.body(f"gate:{i}").id
+            geom_start = self.sim.mj_model.body_geomadr[body_id]
+            geom_count = self.sim.mj_model.body_geomnum[body_id]
+            gate_contact_mask |= ((geom1 >= geom_start) & (geom1 < geom_start + geom_count)) | (
+                (geom2 >= geom_start) & (geom2 < geom_start + geom_count)
+            )
+        for i in range(self.data.obstacles_pos.shape[1]):
+            body_id = self.sim.mj_model.body(f"obstacle:{i}").id
+            geom_start = self.sim.mj_model.body_geomadr[body_id]
+            geom_count = self.sim.mj_model.body_geomnum[body_id]
+            obstacle_contact_mask |= (
+                (geom1 >= geom_start) & (geom1 < geom_start + geom_count)
+            ) | ((geom2 >= geom_start) & (geom2 < geom_start + geom_count))
+        gate_contact_mask = jp.array(gate_contact_mask)[None, None, :]
+        obstacle_contact_mask = jp.array(obstacle_contact_mask)[None, None, :]
 
-        def check_contacts(data: EnvData) -> Array:
+        def check_contacts(data: EnvData) -> tuple[Array, Array, Array]:
             """Check for contacts between drones and gates/obstacles."""
             mocap_pos, mocap_quat = _mjx_data.mocap_pos, _mjx_data.mocap_quat
             mocap_pos = mocap_pos.at[..., gate_ids, :].set(data.gates_pos)
@@ -593,7 +620,10 @@ class RaceCoreEnv:
             # Sync changes to MuJoCo and perform a collision check
             _, mjx_data = sync_sim2mjx(data.sim_data, mjx_data, self.sim.mjx_model)
             contacts = mjx_data._impl.contact.dist < 0
-            return jp.any(contacts[:, None, :] & contact_masks, axis=-1)
+            drone_contacts = contacts[:, None, :] & contact_masks
+            gate_hits = jp.any(drone_contacts & gate_contact_mask, axis=-1)
+            obstacle_hits = jp.any(drone_contacts & obstacle_contact_mask, axis=-1)
+            return jp.any(drone_contacts, axis=-1), gate_hits, obstacle_hits
 
         return check_contacts
 
@@ -694,6 +724,17 @@ def obs(data: EnvData) -> dict[str, Array]:
         "gates_visited": data.gates_visited,
         "obstacles_pos": sensor_obstacles_pos,
         "obstacles_visited": data.obstacles_visited,
+    }
+
+
+def info(
+    data: EnvData, gate_hits: Array | None = None, obstacle_hits: Array | None = None
+) -> dict[str, Array]:
+    """Return auxiliary info arrays for logging and diagnostics."""
+    zero = jp.zeros_like(data.disabled_drones)
+    return {
+        "gate_hits": zero if gate_hits is None else gate_hits,
+        "obstacle_hits": zero if obstacle_hits is None else obstacle_hits,
     }
 
 

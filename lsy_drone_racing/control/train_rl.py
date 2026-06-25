@@ -48,7 +48,7 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    jax_device: str = "gpu"
+    jax_device: str = "cpu"
     """environment device"""
     wandb_project_name: str = "ADR-PPO-Racing"
     """the wandb's project name"""
@@ -56,11 +56,11 @@ class Args:
     """the entity (team) of wandb's project"""
 
     # Algorithm specific arguments
-    total_timesteps: int = 1_500_000
+    total_timesteps: int = 5_500_000
     """total timesteps of the experiments"""
     learning_rate: float = 1.5e-3
     """the learning rate of the optimizer"""
-    num_envs: int = 1024
+    num_envs: int = 2048
     """the number of parallel game environments"""
     num_steps: int = 8
     """the number of steps to run in each environment per policy rollout"""
