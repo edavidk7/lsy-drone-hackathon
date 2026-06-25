@@ -1,0 +1,38 @@
+Training on device: cpu | Environment device: gpu
+Traceback (most recent call last):
+  File "/Users/vaclavkubon/dev/lsy-drone-hackathon/lsy_drone_racing/control/train_rl.py", line 829, in <module>
+    fire.Fire(main)
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/fire/core.py", line 135, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/fire/core.py", line 468, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+                                ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/fire/core.py", line 684, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/vaclavkubon/dev/lsy-drone-hackathon/lsy_drone_racing/control/train_rl.py", line 814, in main
+    train_ppo(args, model_path, device, jax_device, wandb_enabled)
+  File "/Users/vaclavkubon/dev/lsy-drone-hackathon/lsy_drone_racing/control/train_rl.py", line 578, in train_ppo
+    envs = make_envs(
+           ^^^^^^^^^^
+  File "/Users/vaclavkubon/dev/lsy-drone-hackathon/lsy_drone_racing/control/train_rl.py", line 478, in make_envs
+    env = RandTrajEnv(
+          ^^^^^^^^^^^^
+  File "/Users/vaclavkubon/dev/lsy-drone-hackathon/lsy_drone_racing/control/train_rl.py", line 159, in __init__
+    super().__init__(
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/crazyflow/envs/drone_env.py", line 84, in __init__
+    self.device = jax.devices(device)[0]
+                  ^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/jax/_src/xla_bridge.py", line 1039, in devices
+    return get_backend(backend).devices()
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/jax/_src/xla_bridge.py", line 973, in get_backend
+    return _get_backend_uncached(platform)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/jax/_src/xla_bridge.py", line 954, in _get_backend_uncached
+    platform = canonicalize_platform(platform)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniforge/base/envs/drones/lib/python3.11/site-packages/jax/_src/xla_bridge.py", line 758, in canonicalize_platform
+    raise RuntimeError(f"Unknown backend: '{platform}' requested, but no "
+RuntimeError: Unknown backend: 'gpu' requested, but no platforms that are instances of gpu are present. Platforms present are: cpu

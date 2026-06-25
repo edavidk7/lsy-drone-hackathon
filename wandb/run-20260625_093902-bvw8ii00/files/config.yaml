@@ -1,0 +1,99 @@
+_wandb:
+    value:
+        cli_version: 0.28.0
+        e:
+            o5rvyt7fvreucrfgq7m7jaznguhtady4:
+                args:
+                    - cd
+                    - /Users/vaclavkubon/dev/lsy-drone-hackathon
+                codePath: lsy_drone_racing/control/train_rl.py
+                codePathLocal: lsy_drone_racing/control/train_rl.py
+                email: vaclavkubon2@gmail.com
+                executable: /opt/homebrew/Caskroom/miniforge/base/envs/drones/bin/python
+                git:
+                    commit: d73c11638aa73d44484eb50cca6c661f912668b3
+                    remote: git@github.com:edavidk7/lsy-drone-hackathon.git
+                host: wenceslai-mac.local
+                os: macOS-26.2-arm64-arm-64bit
+                program: /Users/vaclavkubon/dev/lsy-drone-hackathon/lsy_drone_racing/control/train_rl.py
+                python: CPython 3.11.15
+                root: /Users/vaclavkubon/dev/lsy-drone-hackathon
+                startedAt: "2026-06-25T07:39:02.662382Z"
+                writerId: o5rvyt7fvreucrfgq7m7jaznguhtady4
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+                - 12
+                - 45
+            "2":
+                - 1
+                - 12
+                - 45
+            "3":
+                - 16
+            "4": 3.11.15
+            "5": 0.28.0
+            "12": 0.28.0
+            "13": darwin-arm64
+act_coef:
+    value: 0.02
+anneal_lr:
+    value: true
+batch_size:
+    value: 8192
+clip_coef:
+    value: 0.26
+clip_vloss:
+    value: true
+cuda:
+    value: true
+d_act_th_coef:
+    value: 0.4
+d_act_xy_coef:
+    value: 1
+ent_coef:
+    value: 0.007
+gae_lambda:
+    value: 0.97
+gamma:
+    value: 0.94
+jax_device:
+    value: gpu
+learning_rate:
+    value: 0.0015
+max_grad_norm:
+    value: 1.5
+minibatch_size:
+    value: 1024
+n_obs:
+    value: 2
+norm_adv:
+    value: true
+num_envs:
+    value: 1024
+num_iterations:
+    value: 183
+num_minibatches:
+    value: 8
+num_steps:
+    value: 8
+rpy_coef:
+    value: 0.06
+seed:
+    value: 42
+target_kl:
+    value: null
+torch_deterministic:
+    value: true
+total_timesteps:
+    value: 1500000
+update_epochs:
+    value: 10
+vf_coef:
+    value: 0.7
+wandb_entity:
+    value: null
+wandb_project_name:
+    value: ADR-PPO-Racing

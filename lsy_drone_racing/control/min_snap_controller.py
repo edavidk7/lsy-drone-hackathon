@@ -78,6 +78,16 @@ class MinSnapController(Controller):
 
         self._plan(np.asarray(obs["pos"], dtype=float))
 
+    @property
+    def spline(self):
+        """The planned position trajectory as a callable spline ``t -> [x, y, z]``."""
+        return self._spline
+
+    @property
+    def t_total(self) -> float:
+        """Total duration of the planned trajectory in seconds."""
+        return self._t_total
+
     # --- Planning -----------------------------------------------------------------------------
     def _plan(self, start_pos: NDArray[np.floating]):
         """Build waypoints, then optimize the free via points for min snap + clearance."""
