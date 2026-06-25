@@ -60,7 +60,7 @@ class Args:
     ent_coef: float = 0.02
     vf_coef: float = 0.7
     max_grad_norm: float = 1.0
-    target_kl: float | None = 0.05  # can be none
+    target_kl: float | None = None  # can be none
 
     actor_hdim: int = 256
     critic_hdim: int = 256
@@ -104,6 +104,7 @@ def set_seeds(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.set_float32_matmul_precision('high')
 
 
 def _safe_run_name(name: str) -> str:
