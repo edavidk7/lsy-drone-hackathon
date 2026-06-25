@@ -1,0 +1,109 @@
+# my_track.toml — minimal real-flight test: two staggered side-by-side gates.
+#
+# Layout (track frame, origin = marked floor point, +x along the marked axis):
+#
+#                        gate2 (faces +x)   (+0.2, +0.6)
+#                       [  -->  ]
+#   start ---------->  [  -->  ]            gate1 (faces +x), (-0.2, -0.6)
+#  (-1.3,-0.6)          (-0.2,-0.6)
+#
+# Both gates face +x (yaw=0): the drone crosses both going +x, weaving from gate1 over
+# to gate2. The gates are staggered in x (-0.2 vs +0.2) so they do NOT lie in the same
+# plane, and offset in y (-0.6 vs +0.6) so there is room for the diagonal between them.
+#
+# Both gates SHORT (center 0.7 m). One obstacle parked in a far corner (env needs >=1).
+# All coordinates well inside the safety box.
+
+[controller]
+file = "min_snap_controller.py" # override on the CLI with --controller if needed
+
+[deploy]
+real_track_objects = false   # lighthouse mode: nothing tracks the gates -> config IS ground truth
+lighthouse = true            # use the drone's onboard Lighthouse estimate (no mocap)
+check_race_track = true
+check_drone_start_pos = true
+
+[[deploy.drones]]
+id = 10
+channel = 100
+drone_model = "cf21B_500"
+
+[sim]
+physics = "first_principles"
+drone_model = "cf21B_500"
+freq = 500
+attitude_freq = 500
+render = true
+camera = -1
+[[sim.cam_config]]
+distance = 5.0
+azimuth = 180.0
+elevation = -25.0
+lookat = [0.0, 0.0, 0.0]
+
+[env]
+id = "DroneRacing-v0"
+seed = -1
+freq = 50
+sensor_range = 0.7
+control_mode = "state"
+
+[env.track]
+randomize = false
+
+# Tall gates: 1.195 m center. Short gates: 0.695 m center. Opening 0.4 m, faces gate local x-axis (yaw).
+[[env.track.gates]]
+pos = [-0.4, -0.6, 0.7]
+rpy = [0.0, 0.0, 0.0]      # forward = +x: drone crosses this one going +x
+[[env.track.gates]]
+pos = [0.4, 0.6, 0.7]
+rpy = [0.0, 0.0, 0.0]  # forward = +x: drone crosses this one going +x
+
+# One obstacle parked in a far corner, clear of the U-turn region. The env requires
+# >=1 obstacle. Post is ~1.52 m tall -> z = 1.55.
+[[env.track.obstacles]]
+pos = [-1.3, 1.3, 1.55]
+
+[[env.track.drones]]
+pos = [-1.3, -0.6, 0.05]
+rpy = [0.0, 0.0, 0.0]
+vel = [0, 0, 0]
+ang_vel = [0, 0, 0]
+
+[env.track.safety_limits]
+pos_limit_low = [-2.5, -1.5, -1e-3]
+pos_limit_high = [2.5, 1.5, 2.0]
+
+[env.disturbances.action]
+fn = "normal"
+scale = 0.001
+
+[env.disturbances.dynamics]
+fn = "uniform"
+[env.disturbances.dynamics.kwargs]
+minval = [-0.1, -0.1, -0.1]
+maxval = [0.1, 0.1, 0.1]
+
+[env.randomizations.drone_pos]
+fn = "uniform"
+[env.randomizations.drone_pos.kwargs]
+minval = [-0.1, -0.1, 0.0]
+maxval = [0.1, 0.1, 0.02]
+
+[env.randomizations.drone_rpy]
+fn = "uniform"
+[env.randomizations.drone_rpy.kwargs]
+minval = [-0.1, -0.1, -0.1]
+maxval = [0.1, 0.1, 0.1]
+
+[env.randomizations.drone_mass]
+fn = "uniform"
+[env.randomizations.drone_mass.kwargs]
+minval = -0.005
+maxval = 0.005
+
+[env.randomizations.drone_inertia]
+fn = "uniform"
+[env.randomizations.drone_inertia.kwargs]
+minval = [-0.000001, -0.000001, -0.000001]
+maxval = [0.000001, 0.000001, 0.000001]
