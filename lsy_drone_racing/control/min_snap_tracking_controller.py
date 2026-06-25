@@ -48,8 +48,8 @@ class MinSnapTrackingController(Controller):
     """Min-snap planner + geometric attitude tracker (no learning). A careful RL baseline."""
 
     # Plan a gentle trajectory: tracking accuracy, not lap time, is the goal of this baseline.
-    PLAN_SPEED = 0.6
-    PLAN_A_LIMIT = 6.0
+    PLAN_SPEED = 0.5
+    PLAN_A_LIMIT = 5.0
 
     # Cascaded controller gains, in acceleration space (m/s^2 per m, per m/s). Conservative and
     # well-damped -- with the acceleration feedforward the loop only corrects residual error.
