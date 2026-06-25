@@ -34,7 +34,7 @@ class Args:
     config: str = "level0.toml"
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
 
-    total_timesteps: int = 20_000_000
+    total_timesteps: int = 200_000_000
     learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
     num_envs: int = 2048
     num_steps: int = 16
@@ -43,30 +43,30 @@ class Args:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     num_minibatches: int = 8
-    update_epochs: int = 8
+    update_epochs: int = 10
     norm_adv: bool = True
     clip_coef: float = 0.23  # 0.23 also worked well
     clip_vloss: bool = True
     ent_coef: float = 0.02
     vf_coef: float = 0.7
     max_grad_norm: float = 1.0
-    target_kl: float | None = None  # can be none
+    target_kl: float | None = 0.05  # can be none
 
     actor_hdim: int = 256
     critic_hdim: int = 256
     gate_progress_coef: float = 5.0
     gate_pass_bonus: float = 10.0
-    success_bonus: float = 10.0
-    crash_penalty: float = 1.0
-    init_logstd: float = -1
+    success_bonus: float = 15.0
+    crash_penalty: float = 5.0
+    init_logstd: float = -0.1
     init_logstd_last: float = 1.0
     act_coef: float = 0.01  # energy penalty on the collective-thrust action channel only
     d_act_main_coef: float = 0.1  # jerk penalty on the roll/pitch/yaw action channels
-    d_act_aux_coef: float = 0.1  # jerk penalty on the collective-thrust action channel
+    d_act_aux_coef: float = 0.2  # jerk penalty on the collective-thrust action channel
     max_angle: float = float(np.pi / 2)  # rad, max commanded roll/pitch
     max_yaw: float = float(np.pi / 2)  # rad, max commanded yaw
     n_nearest_obstacles: int = 2
-    progress_obs: bool = False  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
+    progress_obs: bool = True  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
     lookahead_gates: int = 0  # number of upcoming gates (after the target) to include, in the drone body frame
     gravity_obs: bool = False  # append the gravity direction in the drone body frame (attitude/tilt cue)
     gate_orient_rotmat: bool = True  # gate orientation as a 9-D rotation matrix (True) or a 3-D facing normal (False)
