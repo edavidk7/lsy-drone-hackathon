@@ -87,6 +87,17 @@ class NavRLController(Controller):
             ) from exc
         self._agent.eval()
 
+        # Optional debug UI: publish each control step over ZMQ when DEBUG_UI_ENABLE is set.
+        # Lazy + guarded so deployments without the env var (or without pyzmq) are unaffected.
+        self._t = 0
+        self._dbg = None
+        try:
+            from lsy_drone_racing.debug_ui.publisher import get_publisher
+
+            self._dbg = get_publisher()
+        except Exception:  # noqa: BLE001 - the debug UI must never break the controller.
+            self._dbg = None
+
     def _extract_state_dict(self, checkpoint: dict) -> dict:
         """Return the model state dict from either a checkpoint bundle or a raw state dict."""
         if "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
@@ -233,8 +244,13 @@ class NavRLController(Controller):
             command = attitude_setpoint_from_action(
                 action_np, self._thrust_min, self._thrust_max, self._max_angle, self._max_yaw, xp=np
             )
-            return command.astype(np.float32)
-        return action_np.astype(np.float32)
+            command = command.astype(np.float32)
+        else:
+            command = action_np.astype(np.float32)
+        if self._dbg is not None:
+            self._dbg.publish(self._t, obs, command, self._prev_action)
+        self._t += 1
+        return command
 
     def step_callback(
         self,
@@ -253,3 +269,4 @@ class NavRLController(Controller):
         """Reset the finished flag and previous-action buffer between episodes."""
         self._finished = False
         self._prev_action = np.zeros(self._act_dim, dtype=np.float32)
+        self._t = 0

@@ -303,6 +303,11 @@ def build_navigation_features(
         # implicit in the gate-relative terms). World down is (0, 0, -1).
         gravity_world = jp.broadcast_to(jp.asarray([0.0, 0.0, -1.0], dtype=obs["pos"].dtype), obs["pos"].shape)
         feats.append(_rotate_world_to_body(gravity_world, obs["quat"]))
+    # Absolute altitude (world z): the one genuinely global cue the egocentric encoding drops. The
+    # symmetry the body frame exploits (yaw + horizontal translation) does not include the vertical
+    # axis (gravity breaks it), so height above the ground - relevant for the z<0 ground crash and the
+    # absolute gate heights - is not recoverable from the gate-relative features alone.
+    feats.append(obs["pos"][..., 2:3])
     feats.extend([nearest_obstacles, visited_ratio])
     if include_progress:
         # Fraction of gates already passed: target_gate is the index of the gate being flown to (=
