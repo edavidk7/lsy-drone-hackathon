@@ -33,6 +33,11 @@ from scipy.interpolate import CubicSpline
 from torch import Tensor
 from torch.distributions.normal import Normal
 
+from lsy_drone_racing.control.min_snap_controller import (
+    MinSnapController,
+    make_planner,
+    sample_random_track,
+)
 from lsy_drone_racing.envs.race_core import build_dynamics_disturbance_fn, rng_spec2fn
 from lsy_drone_racing.utils import load_config
 
@@ -177,6 +182,13 @@ class RandTrajEnv(DroneEnv):
         self.sample_offsets = np.array(np.arange(n_samples) * self.freq * samples_dt, dtype=int)
         self.trajectories = np.zeros((self.num_envs, self.n_steps, 3))
 
+        # Min-snap planner shared with inference. Match the inference cruise speed / accel cap so
+        # the look-ahead point spacing the policy learns to track is in-distribution at race time.
+        MinSnapController.SPEED = 0.6
+        MinSnapController.A_LIMIT = 6.0
+        self._planner = make_planner(self.freq)
+        self._rng = np.random.default_rng()
+
         # Set takeoff position and build default reset position
         self.takeoff_pos = np.array([-1.5, 1.0, 0.07])
         data = self.sim.data
@@ -207,26 +219,18 @@ class RandTrajEnv(DroneEnv):
         self, *, seed: int | None = None, options: dict | None = None
     ) -> tuple[dict[str, Array], dict]:
         """Reset."""
-        # Create a random trajectory based on spline interpolation
+        # Create a random trajectory with the SAME min-snap planner used at inference, over random
+        # gate layouts. This trains the policy on the gate-crossing path shapes (perpendicular
+        # crossings, pole-avoidance detours, quintic min-snap smoothness) it sees at race time,
+        # rather than the cubic splines through uniform-random waypoints used originally.
         t = np.linspace(0, self.trajectory_time, self.n_steps)
-        scale = np.array([1.2, 1.2, 0.5])
-        waypoints = (
-            np.random.uniform(-1, 1, size=(self.sim.n_worlds, self.num_waypoints, 3)) * scale
-        )
-        waypoints = (
-            waypoints + 0.3 * self.takeoff_pos + np.array([0.0, 0.0, 0.7])
-        )  # shift up in z direction
-        waypoints[:, :3, :] = np.array(
-            [[-1.5, 1.0, 0.07], [-1.0, 0.55, 0.4], [0.3, 0.35, 0.7]]
-        )  # set first three waypoints
-        v0 = np.tile(np.array([[0.0, 0.0, 0.4]]), (self.sim.n_worlds, 1))  # takeoff velocity
-        spline = CubicSpline(
-            np.linspace(0, self.trajectory_time, self.num_waypoints),
-            waypoints,
-            axis=1,
-            bc_type=((1, v0), "not-a-knot"),
-        )
-        self.trajectories = spline(t)  # (n_worlds, n_steps, 3)
+        for w in range(self.sim.n_worlds):
+            gates_pos, gates_quat, obstacles_pos = sample_random_track(self._rng, self.takeoff_pos)
+            self._planner.replan(
+                self.takeoff_pos, 0, gates_pos, gates_quat, obstacles_pos, optimize=False
+            )
+            # Sample on the fixed episode time grid; clip past t_total to hold the final point.
+            self.trajectories[w] = self._planner.spline(np.clip(t, 0.0, self._planner.t_total))
 
         super().reset(seed=seed)
         if seed is not None:
@@ -483,6 +487,10 @@ def make_envs(
         physics=config.sim.physics,
         disturbances=config.env.disturbances,
         device=jax_device,
+        # Random min-snap gate courses can run longer than the original 15 s; give episodes room
+        # so the drone reaches the later gates of a course.
+        trajectory_time=20.0,
+        max_episode_time=20.0,
     )
 
     env = NormalizeActions(env)
@@ -803,10 +811,24 @@ def evaluate_ppo(args: Args, n_eval: int, model_path: Path) -> tuple[float, floa
 
 
 # region Main
-def main(wandb_enabled: bool = True, train: bool = True, eval: int = 1):
-    """Main."""
+def main(
+    wandb_enabled: bool = True,
+    train: bool = True,
+    eval: int = 1,
+    model_name: str = "ppo_min_snap.ckpt",
+):
+    """Main.
+
+    Args:
+        wandb_enabled: Whether to log to Weights & Biases.
+        train: If ``False``, skip training and only evaluate.
+        eval: Number of evaluation episodes to run after training.
+        model_name: Checkpoint filename (under ``control/``). Defaults to ``ppo_min_snap.ckpt`` so
+            the original ``ppo_drone_racing.ckpt`` is preserved; point the controller at this file
+            once training finishes.
+    """
     args = Args.create()
-    model_path = Path(__file__).parent / "ppo_drone_racing.ckpt"
+    model_path = Path(__file__).parent / model_name
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     jax_device = args.jax_device
 

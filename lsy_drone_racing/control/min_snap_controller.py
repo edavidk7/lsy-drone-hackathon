@@ -57,13 +57,17 @@ class MinSnapController(Controller):
     W_SNAP = 1.0
     W_COLLISION = 5.0e4
 
-    def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
+    def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict, *,
+                 plan: bool = True):
         """Plan the trajectory from the initial observation.
 
         Args:
             obs: Initial observation. Uses ``pos``, ``gates_pos``, ``gates_quat``, ``obstacles_pos``.
             info: Reset info (unused).
             config: Race config; ``config.env.freq`` is the control frequency.
+            plan: If ``False``, only set up state without computing the (expensive) initial plan.
+                Used when the object is reused purely as a planner (e.g. in training) and the path
+                is produced via :meth:`replan` instead.
         """
         super().__init__(obs, info, config)
         self._freq = config.env.freq
@@ -75,8 +79,23 @@ class MinSnapController(Controller):
         self._pole_r = self.POLE_RADIUS + self.DRONE_RADIUS + self.SAFE_MARGIN
         self._gates_pos = np.asarray(obs["gates_pos"], dtype=float)
         self._gates_rot = R.from_quat(np.asarray(obs["gates_quat"], dtype=float))
+        self._first_gate = 0  # plan through gates [_first_gate:]; advanced on re-plan
 
-        self._plan(np.asarray(obs["pos"], dtype=float))
+        if plan:
+            self._plan(np.asarray(obs["pos"], dtype=float))
+
+    def replan(self, start_pos, first_gate, gates_pos, gates_quat, obstacles_pos, optimize=False):
+        """Re-plan from ``start_pos`` through the remaining gates with updated sensed poses.
+
+        Used by re-planning controllers when a gate's observed pose changes. ``optimize=False``
+        skips the slow L-BFGS pass (keeping only the cheap seed + clearance repair) so the re-plan
+        is fast enough to run between control steps.
+        """
+        self._poles_xy = np.asarray(obstacles_pos, dtype=float)[:, :2]
+        self._gates_pos = np.asarray(gates_pos, dtype=float)
+        self._gates_rot = R.from_quat(np.asarray(gates_quat, dtype=float))
+        self._first_gate = int(first_gate)
+        self._plan(np.asarray(start_pos, dtype=float), optimize=optimize)
 
     @property
     def spline(self):
@@ -89,7 +108,7 @@ class MinSnapController(Controller):
         return self._t_total
 
     # --- Planning -----------------------------------------------------------------------------
-    def _plan(self, start_pos: NDArray[np.floating]):
+    def _plan(self, start_pos: NDArray[np.floating], optimize: bool = True):
         """Build waypoints, then optimize the free via points for min snap + clearance."""
         fixed, free_idx = self._build_waypoints(start_pos)
         # Time allocation: proportional to chord length, then global speed scaling.
@@ -112,10 +131,13 @@ class MinSnapController(Controller):
             spl = make_interp_spline(knots, wp, k=5)
             return self.W_SNAP * self._snap_cost(spl) + self.W_COLLISION * self._collision_cost(spl)
 
-        try:
-            res = minimize(objective, x0, method="L-BFGS-B", options={"maxiter": 80})
-            wp = assemble(res.x)
-        except Exception:  # planning must never crash the controller; fall back to the guess
+        if optimize:
+            try:
+                res = minimize(objective, x0, method="L-BFGS-B", options={"maxiter": 80})
+                wp = assemble(res.x)
+            except Exception:  # planning must never crash the controller; fall back to the guess
+                wp = fixed
+        else:  # fast path: skip the L-BFGS pass, rely on seeded via points + clearance repair
             wp = fixed
 
         # Guarantee clearance: the snap+penalty optimization gives a smooth path but can leave
@@ -179,15 +201,16 @@ class MinSnapController(Controller):
     def _build_waypoints(self, start_pos: NDArray[np.floating]):
         """Return (waypoints, indices_of_free_via_points)."""
         fixed = [start_pos]
-        for i in range(len(self._gates_pos)):
+        last = max(self._first_gate, len(self._gates_pos) - 1)
+        for i in range(self._first_gate, len(self._gates_pos)):
             normal = self._gates_rot[i].apply([1.0, 0.0, 0.0])
             center = self._gates_pos[i]
             fixed.append(center - self.GATE_LEAD * normal)  # pre
             fixed.append(center)                            # center
             fixed.append(center + self.GATE_LEAD * normal)  # post
-        # End: continue a bit past the last gate along its normal.
-        last_normal = self._gates_rot[-1].apply([1.0, 0.0, 0.0])
-        fixed.append(self._gates_pos[-1] + (self.GATE_LEAD + 0.5) * last_normal)
+        # End: continue a bit past the last remaining gate along its normal.
+        last_normal = self._gates_rot[last].apply([1.0, 0.0, 0.0])
+        fixed.append(self._gates_pos[last] + (self.GATE_LEAD + 0.5) * last_normal)
 
         # Insert N_VIA free via points between every pair of fixed points, seeded clear of the
         # poles. Multiple points give the spline local control to bow around a pole that sits close
@@ -297,3 +320,72 @@ class MinSnapController(Controller):
         draw_points(sim, self._waypoints, rgba=(0.0, 0.0, 1.0, 1.0), size=0.02)
         setpoint = self._spline(min(self._tick / self._freq, self._t_total)).reshape(1, -1)
         draw_points(sim, setpoint, rgba=(1.0, 0.0, 0.0, 1.0), size=0.03)
+
+
+# region Training helpers
+def sample_random_track(rng, takeoff_pos, n_gates: int = 4, n_obstacles: int = 4):
+    """Sample a random gate/obstacle layout for training, matching the competition distribution.
+
+    Gates are scattered in x-y within the arena, alternating the two height tiers (0.7 m short /
+    1.2 m tall, as in the nominal track) with random yaw. Obstacles (poles) are placed at random
+    x-y positions, kept away from the gate centers and the takeoff spot so the track stays solvable.
+
+    Args:
+        rng: A ``numpy.random.Generator``.
+        takeoff_pos: Drone start position ``[x, y, z]`` (gates/obstacles are kept clear of it).
+        n_gates: Number of gates.
+        n_obstacles: Number of obstacles.
+
+    Returns:
+        ``(gates_pos (n_gates, 3), gates_quat (n_gates, 4), obstacles_pos (n_obstacles, 3))``.
+    """
+    x_lo, x_hi, y_lo, y_hi = -2.0, 2.0, -1.3, 1.3
+    heights = np.array([0.7, 1.2])
+    start_xy = np.asarray(takeoff_pos, dtype=float)[:2]
+
+    gates_pos = np.zeros((n_gates, 3))
+    for i in range(n_gates):
+        for _ in range(50):  # rejection-sample a spot far enough from prior gates and the start
+            xy = np.array([rng.uniform(x_lo, x_hi), rng.uniform(y_lo, y_hi)])
+            ok = np.linalg.norm(xy - start_xy) > 0.6
+            ok &= all(np.linalg.norm(xy - gates_pos[j, :2]) > 0.8 for j in range(i))
+            if ok:
+                break
+        gates_pos[i, :2] = xy
+        gates_pos[i, 2] = heights[i % 2]
+    yaws = rng.uniform(-np.pi, np.pi, size=n_gates)
+    gates_quat = np.zeros((n_gates, 4))  # xyzw quaternion for a yaw (z-axis) rotation
+    gates_quat[:, 2] = np.sin(yaws / 2.0)
+    gates_quat[:, 3] = np.cos(yaws / 2.0)
+
+    obstacles_pos = np.zeros((n_obstacles, 3))
+    for i in range(n_obstacles):
+        for _ in range(50):  # keep poles off the gate centers and the start
+            xy = np.array([rng.uniform(x_lo, x_hi), rng.uniform(y_lo, y_hi)])
+            ok = np.linalg.norm(xy - start_xy) > 0.5
+            ok &= all(np.linalg.norm(xy - gates_pos[j, :2]) > 0.35 for j in range(n_gates))
+            ok &= all(np.linalg.norm(xy - obstacles_pos[j, :2]) > 0.5 for j in range(i))
+            if ok:
+                break
+        obstacles_pos[i, :2] = xy
+        obstacles_pos[i, 2] = 1.55
+    return gates_pos, gates_quat, obstacles_pos
+
+
+def make_planner(freq: float = 50.0):
+    """Create a reusable :class:`MinSnapController` set up purely as a planner (no initial plan).
+
+    Call :meth:`MinSnapController.replan` on the returned object to generate a path, then read
+    ``planner.spline`` / ``planner.t_total``. Used by the training pipeline so training trajectories
+    are produced by the exact same planner as inference.
+    """
+    from types import SimpleNamespace
+
+    dummy = {
+        "pos": np.zeros(3),
+        "gates_pos": np.zeros((1, 3)),
+        "gates_quat": np.array([[0.0, 0.0, 0.0, 1.0]]),
+        "obstacles_pos": np.zeros((1, 3)),
+    }
+    config = SimpleNamespace(env=SimpleNamespace(freq=freq))
+    return MinSnapController(dummy, {}, config, plan=False)
