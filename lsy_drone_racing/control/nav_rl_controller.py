@@ -45,7 +45,9 @@ class NavRLController(Controller):
         act_dim = 4 if self._control_mode == "attitude" else 13
         self._act_dim = act_dim
         self._n_nearest_obstacles = int(getattr(config.controller, "n_nearest_obstacles", 2))
-        self._include_progress = bool(getattr(config.controller, "progress_obs", Args.progress_obs))
+        self._include_progress = bool(getattr(config.controller, "progress_obs", False))
+        self._lookahead_gates = int(getattr(config.controller, "lookahead_gates", Args.lookahead_gates))
+        self._gravity_obs = bool(getattr(config.controller, "gravity_obs", Args.gravity_obs))
         # Single previous action a_{t-1} appended to the observation (matches train_nav_rl.PrevAction).
         self._prev_action = np.zeros(act_dim, dtype=np.float32)
 
@@ -56,6 +58,8 @@ class NavRLController(Controller):
         if ckpt_args is not None:
             self._n_nearest_obstacles = int(ckpt_args.get("n_nearest_obstacles", self._n_nearest_obstacles))
             self._include_progress = bool(ckpt_args.get("progress_obs", self._include_progress))
+            self._lookahead_gates = int(ckpt_args.get("lookahead_gates", self._lookahead_gates))
+            self._gravity_obs = bool(ckpt_args.get("gravity_obs", self._gravity_obs))
             obs_dim = int(self._obs_tensor(obs).shape[-1])
         arch = checkpoint.get("arch")
         if isinstance(arch, dict) and arch.get("obs_shape") is not None:
@@ -194,7 +198,11 @@ class NavRLController(Controller):
         """Compute the compact navigation feature vector for the current observation."""
         obs_jax = {k: np.asarray(v)[None, ...] for k, v in obs.items()}
         features = build_navigation_features(
-            obs_jax, n_nearest_obstacles=self._n_nearest_obstacles, include_progress=self._include_progress
+            obs_jax,
+            n_nearest_obstacles=self._n_nearest_obstacles,
+            include_progress=self._include_progress,
+            lookahead_gates=self._lookahead_gates,
+            gravity_obs=self._gravity_obs,
         )
         return np.array(features[0], copy=True, dtype=np.float32)
 

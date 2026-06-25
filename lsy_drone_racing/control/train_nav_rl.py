@@ -77,6 +77,8 @@ class Args:
     max_yaw: float = float(np.pi / 2)  # rad, max commanded yaw 
     n_nearest_obstacles: int = 2
     progress_obs: bool = True  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
+    lookahead_gates: int = 1  # number of upcoming gates (after the target) to include, in the drone body frame
+    gravity_obs: bool = True  # append the gravity direction in the drone body frame (attitude/tilt cue)
     checkpoint_every_iterations: int = 10
     episode_step_limit: int = 1500
 
@@ -236,18 +238,72 @@ def _nearest_obstacle_features(obs: dict[str, Array], n_nearest: int) -> Array:
     return jp.concatenate([nearest, visited], axis=-1).reshape(obstacle_delta_body.shape[0], -1)
 
 
-@partial(jax.jit, static_argnames=("n_nearest_obstacles", "include_progress"))
-def build_navigation_features(obs: dict[str, Array], n_nearest_obstacles: int, include_progress: bool = False) -> Array:
+@jax.jit
+def _gate_facing_body(quat_rel: Array) -> Array:
+    """Gate pass-through normal (gate local +x) expressed in the drone body frame, shape ``(..., 3)``.
+
+    A gate is a ~1-DOF (yaw) oriented plane, so its facing direction is all the policy needs to plan
+    the crossing - far less than a full 3x3 relative rotation, which would also redundantly re-encode
+    the drone's own attitude (fed separately as gravity-in-body). As a body-frame unit vector it is
+    egocentric and continuous (no yaw wraparound), and it still captures small gate roll/pitch
+    perturbations. Equals the first column of the drone->gate relative rotation matrix.
+    """
+    rotmat_rel = _quat_to_rotmat(quat_rel)
+    return rotmat_rel[..., jp.asarray([0, 3, 6])]
+
+
+def _lookahead_gate_features(obs: dict[str, Array], n_lookahead: int) -> Array:
+    """Body-frame relative position + relative orientation of the next ``n_lookahead`` gates.
+
+    The features are egocentric (drone-local), like the target-gate terms, so they are rotation
+    invariant and directly actionable. On a randomized track the policy cannot memorize the layout,
+    so seeing the upcoming gate(s) is what lets it plan a line through the current gate that sets up
+    the next one. Gates past the last (no successor) are zeroed; the policy reads all-zeros as "no
+    further gate". The upcoming gate's nominal pose is available from t=0 even under a finite
+    sensor_range, so this is real planning information, not a privileged leak.
+    """
+    target_gate = obs["target_gate"]
+    n_gates = obs["gates_pos"].shape[1]
+    feats = []
+    for k in range(1, n_lookahead + 1):
+        idx = target_gate + k
+        valid = ((target_gate >= 0) & (idx < n_gates))[:, None].astype(jp.float32)
+        gate_pos = _gather_by_index(obs["gates_pos"], idx)
+        gate_quat = _gather_by_index(obs["gates_quat"], idx)
+        delta_body = _rotate_world_to_body(gate_pos - obs["pos"], obs["quat"])
+        facing_body = _gate_facing_body(_quat_multiply(_quat_conjugate(obs["quat"]), gate_quat))
+        feats.append(delta_body * valid)
+        feats.append(facing_body * valid)
+    return jp.concatenate(feats, axis=-1)
+
+
+@partial(jax.jit, static_argnames=("n_nearest_obstacles", "include_progress", "lookahead_gates", "gravity_obs"))
+def build_navigation_features(
+    obs: dict[str, Array], n_nearest_obstacles: int, include_progress: bool = False, lookahead_gates: int = 0, gravity_obs: bool = False
+) -> Array:
     """Build a compact navigation observation from the privileged environment state."""
     obs = _normalize_obs(obs)
     gate_delta_world, gate_delta_body, gate_quat_rel = _target_gate_metrics(obs)
-    # Encode the relative gate attitude as a 9-D rotation matrix instead of a 4-D quaternion to
-    # avoid the quaternion double-cover ambiguity (matches the Swift paper's observation design).
-    gate_rotmat_rel = _quat_to_rotmat(gate_quat_rel)
+    # The target gate's facing normal in the body frame (3-D), not a full 9-D relative rotation: a
+    # gate is a ~1-DOF (yaw) plane, so its pass-through direction is the sufficient, non-redundant cue.
+    gate_facing_body = _gate_facing_body(gate_quat_rel)
     nearest_obstacles = _nearest_obstacle_features(obs, n_nearest_obstacles)
     # gates_visited is a *sensed* fraction (within sensor_range), not a passed fraction.
     visited_ratio = jp.mean(obs["gates_visited"].astype(jp.float32), axis=-1, keepdims=True)
-    feats = [gate_delta_world, gate_delta_body, gate_rotmat_rel, obs["vel"], obs["ang_vel"], nearest_obstacles, visited_ratio]
+    feats = [gate_delta_world, gate_delta_body, gate_facing_body]
+    if lookahead_gates > 0:
+        feats.append(_lookahead_gate_features(obs, lookahead_gates))
+    # Velocity in the body frame (ang_vel already is), so the drone's motion is expressed egocentrically
+    # and needs no absolute world heading to interpret.
+    vel_body = _rotate_world_to_body(obs["vel"], obs["quat"])
+    feats.extend([vel_body, obs["ang_vel"]])
+    if gravity_obs:
+        # Gravity direction expressed in the body frame: a compact attitude cue telling the policy
+        # which way is down and how tilted it is (the drone's absolute attitude is otherwise only
+        # implicit in the gate-relative terms). World down is (0, 0, -1).
+        gravity_world = jp.broadcast_to(jp.asarray([0.0, 0.0, -1.0], dtype=obs["pos"].dtype), obs["pos"].shape)
+        feats.append(_rotate_world_to_body(gravity_world, obs["quat"]))
+    feats.extend([nearest_obstacles, visited_ratio])
     if include_progress:
         # Fraction of gates already passed: target_gate is the index of the gate being flown to (=
         # number passed), normalized to [0, 1]; the post-finish sentinel (-1) maps to 1.0. Unlike
@@ -300,17 +356,21 @@ def compute_navigation_reward(
 class NavigationObservation(VectorObservationWrapper):
     """Reduce the full environment observation to a compact navigation feature vector."""
 
-    def __init__(self, env: VectorEnv, n_nearest_obstacles: int = 2, include_progress: bool = False):
+    def __init__(self, env: VectorEnv, n_nearest_obstacles: int = 2, include_progress: bool = False, lookahead_gates: int = 0, gravity_obs: bool = False):
         super().__init__(env)
         self.n_nearest_obstacles = n_nearest_obstacles
         self.include_progress = include_progress
-        sample = build_navigation_features(race_obs(env.unwrapped.data), self.n_nearest_obstacles, self.include_progress)
+        self.lookahead_gates = lookahead_gates
+        self.gravity_obs = gravity_obs
+        sample = build_navigation_features(
+            race_obs(env.unwrapped.data), self.n_nearest_obstacles, self.include_progress, self.lookahead_gates, self.gravity_obs
+        )
         feature_dim = int(sample.shape[-1])
         self.single_observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(feature_dim,), dtype=np.float32)
         self.observation_space = batch_space(self.single_observation_space, self.num_envs)
 
     def observations(self, observations: dict[str, Array]) -> Array:
-        return build_navigation_features(observations, self.n_nearest_obstacles, self.include_progress)
+        return build_navigation_features(observations, self.n_nearest_obstacles, self.include_progress, self.lookahead_gates, self.gravity_obs)
 
 
 class PrevAction(VectorObservationWrapper):
@@ -516,7 +576,9 @@ def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str 
         env, gate_progress_coef=args.gate_progress_coef, gate_pass_bonus=args.gate_pass_bonus, success_bonus=args.success_bonus, crash_penalty=args.crash_penalty
     )
     env = ActionPenalty(env, act_coef=args.act_coef, d_act_main_coef=args.d_act_main_coef, d_act_aux_coef=args.d_act_aux_coef, control_mode=control_mode)
-    env = NavigationObservation(env, n_nearest_obstacles=args.n_nearest_obstacles, include_progress=args.progress_obs)
+    env = NavigationObservation(
+        env, n_nearest_obstacles=args.n_nearest_obstacles, include_progress=args.progress_obs, lookahead_gates=args.lookahead_gates, gravity_obs=args.gravity_obs
+    )
     env = PrevAction(env)
     env = JaxToTorch(env, torch_device)
     return env
