@@ -33,7 +33,7 @@ from scipy.interpolate import CubicSpline
 from torch import Tensor
 from torch.distributions.normal import Normal
 
-from lsy_drone_racing.control.min_snap_controller import (
+from lsy_drone_racing.control.three_b_one_s_controller import (
     MinSnapController,
     make_planner,
     sample_random_track,

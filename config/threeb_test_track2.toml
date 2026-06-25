@@ -1,21 +1,19 @@
-# my_track.toml — minimal real-flight test: two staggered side-by-side gates.
+# threeb_test_track2.toml — minimal real-flight test: a single gate, then return home.
 #
 # Layout (track frame, origin = marked floor point, +x along the marked axis):
 #
-#                        gate2 (faces +x)   (+0.2, +0.6)
-#                       [  -->  ]
-#   start ---------->  [  -->  ]            gate1 (faces +x), (-0.2, -0.6)
-#  (-1.3,-0.6)          (-0.2,-0.6)
+#   start ---------->  [  -->  ] ----> (loop back to start)
+#  (-1.5, 0.75)         (-0.4,-0.6)
 #
-# Both gates face +x (yaw=0): the drone crosses both going +x, weaving from gate1 over
-# to gate2. The gates are staggered in x (-0.2 vs +0.2) so they do NOT lie in the same
-# plane, and offset in y (-0.6 vs +0.6) so there is room for the diagonal between them.
+# The gate faces +x (yaw=0): the drone crosses it going +x, then the trajectory loops
+# back to finish where it started (return_to_start = true).
 #
-# Both gates SHORT (center 0.7 m). One obstacle parked in a far corner (env needs >=1).
+# Gate SHORT (center 0.7 m). One obstacle parked in a far corner (env needs >=1).
 # All coordinates well inside the safety box.
 
 [controller]
-file = "min_snap_controller.py" # override on the CLI with --controller if needed
+file = "threeb_controller.py" # override on the CLI with --controller if needed
+return_to_start = true        # finish the trajectory back at the takeoff point
 
 [deploy]
 real_track_objects = false   # lighthouse mode: nothing tracks the gates -> config IS ground truth
@@ -24,8 +22,8 @@ check_race_track = true
 check_drone_start_pos = true
 
 [[deploy.drones]]
-id = 10
-channel = 100
+id = 11
+channel = 80
 drone_model = "cf21B_500"
 
 [sim]
@@ -45,8 +43,8 @@ lookat = [0.0, 0.0, 0.0]
 id = "DroneRacing-v0"
 seed = -1
 freq = 50
-sensor_range = 0.7
-control_mode = "state"
+sensor_range = 100.0   # perfect knowledge: true gate/obstacle poses reported from t=0
+control_mode = "attitude"
 
 [env.track]
 randomize = false
@@ -55,9 +53,6 @@ randomize = false
 [[env.track.gates]]
 pos = [-0.4, -0.6, 0.7]
 rpy = [0.0, 0.0, 0.0]      # forward = +x: drone crosses this one going +x
-[[env.track.gates]]
-pos = [0.4, 0.6, 0.7]
-rpy = [0.0, 0.0, 0.0]  # forward = +x: drone crosses this one going +x
 
 # One obstacle parked in a far corner, clear of the U-turn region. The env requires
 # >=1 obstacle. Post is ~1.52 m tall -> z = 1.55.
@@ -65,7 +60,7 @@ rpy = [0.0, 0.0, 0.0]  # forward = +x: drone crosses this one going +x
 pos = [-1.3, 1.3, 1.55]
 
 [[env.track.drones]]
-pos = [-1.3, -0.6, 0.05]
+pos = [-1.5, 0.75, 0.01]
 rpy = [0.0, 0.0, 0.0]
 vel = [0, 0, 0]
 ang_vel = [0, 0, 0]
