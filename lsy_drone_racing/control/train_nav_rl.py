@@ -625,6 +625,19 @@ class Agent(nn.Module):
             actor_logstd[0, -1] = float(init_logstd_last)
         self.actor_logstd = nn.Parameter(actor_logstd)
 
+    @torch.no_grad()
+    def reset_logstd(self, init_logstd: float, init_logstd_last: float | None) -> None:
+        """Reset the action log-std to the initial exploration level (same layout as ``__init__``).
+
+        Used when warm-starting from a checkpoint: ``load_state_dict`` restores the source policy's
+        (often converged, near-deterministic) log-std, which leaves a resumed run on a harder task
+        exploration-starved and prone to collapsing to a deterministic local optimum. Resetting
+        re-opens exploration while keeping the loaded actor/critic weights.
+        """
+        self.actor_logstd.fill_(float(init_logstd))
+        if init_logstd_last is not None:
+            self.actor_logstd[0, -1] = float(init_logstd_last)
+
     @torch.compile
     def get_value(self, x: Tensor) -> Tensor:
         return self.critic(self.obs_rms.normalize(x))
@@ -688,7 +701,16 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
         # recalibrates from the current env's observations (update() runs before the first forward
         # pass each step, so there is no normalization shock).
         agent.obs_rms.reset()
-        print(f"Resumed agent weights from {resume_path} (obs normalization reset to re-adapt)")
+        # load_state_dict also restored actor_logstd, i.e. the source policy's (often converged,
+        # near-deterministic) exploration level. Inheriting it leaves a resume on a harder task
+        # exploration-starved, which collapses to a deterministic local optimum (grad norm and
+        # clipfrac -> 0). Reset it to the configured initial exploration so the warm-started weights
+        # can still explore.
+        agent.reset_logstd(args.init_logstd, args.init_logstd_last)
+        print(
+            f"Resumed agent weights from {resume_path} "
+            f"(obs normalization + action log-std reset to re-adapt and re-explore)"
+        )
     optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     base_dir = model_path.parent if model_path is not None else Path(__file__).parent
     if wandb_enabled and wandb.run is not None and wandb.run.name:
