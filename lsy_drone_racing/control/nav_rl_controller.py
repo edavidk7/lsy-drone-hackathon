@@ -51,16 +51,14 @@ class NavRLController(Controller):
         # Single previous action a_{t-1} appended to the observation (matches train_nav_rl.PrevAction).
         self._prev_action = np.zeros(act_dim, dtype=np.float32)
 
-        obs_dim = int(self._obs_tensor(obs).shape[-1])
-        model_path, checkpoint = self._resolve_model(config, obs_dim=obs_dim, act_dim=act_dim)
+        # Resolve a checkpoint first (matched on act_dim and the obs layout implied by *its own*
+        # training args), then adopt those feature flags so the observation builder reproduces the
+        # checkpoint's obs layout. This ordering matters: building obs_dim from the config defaults
+        # before adopting the checkpoint's args would reject a checkpoint that is actually loadable.
+        model_path, checkpoint = self._resolve_model(config, obs=obs, act_dim=act_dim)
         state = self._extract_state_dict(checkpoint)
-        ckpt_args = self._extract_args(checkpoint)
-        if ckpt_args is not None:
-            self._n_nearest_obstacles = int(ckpt_args.get("n_nearest_obstacles", self._n_nearest_obstacles))
-            self._include_progress = bool(ckpt_args.get("progress_obs", self._include_progress))
-            self._lookahead_gates = int(ckpt_args.get("lookahead_gates", self._lookahead_gates))
-            self._gravity_obs = bool(ckpt_args.get("gravity_obs", self._gravity_obs))
-            obs_dim = int(self._obs_tensor(obs).shape[-1])
+        self._apply_ckpt_args(self._extract_args(checkpoint))
+        obs_dim = int(self._obs_tensor(obs).shape[-1])
         arch = checkpoint.get("arch")
         if isinstance(arch, dict) and arch.get("obs_shape") is not None:
             expected_obs_dim = int(arch["obs_shape"][0])
@@ -109,6 +107,46 @@ class NavRLController(Controller):
         args = checkpoint.get("args")
         return args if isinstance(args, dict) else None
 
+    def _feature_flags(self, ckpt_args: dict | None) -> tuple[int, bool, int, bool]:
+        """Resolve the observation feature flags, preferring the checkpoint's training args.
+
+        Missing keys or explicit ``None`` values fall back to the controller's current settings, so
+        a checkpoint only overrides the flags it actually recorded.
+        """
+        n, p, lk, g = (
+            self._n_nearest_obstacles,
+            self._include_progress,
+            self._lookahead_gates,
+            self._gravity_obs,
+        )
+        if ckpt_args:
+            if ckpt_args.get("n_nearest_obstacles") is not None:
+                n = int(ckpt_args["n_nearest_obstacles"])
+            if ckpt_args.get("progress_obs") is not None:
+                p = bool(ckpt_args["progress_obs"])
+            if ckpt_args.get("lookahead_gates") is not None:
+                lk = int(ckpt_args["lookahead_gates"])
+            if ckpt_args.get("gravity_obs") is not None:
+                g = bool(ckpt_args["gravity_obs"])
+        return n, p, lk, g
+
+    def _apply_ckpt_args(self, ckpt_args: dict | None) -> None:
+        """Adopt the feature flags the checkpoint was trained with."""
+        self._n_nearest_obstacles, self._include_progress, self._lookahead_gates, self._gravity_obs = (
+            self._feature_flags(ckpt_args)
+        )
+
+    def _obs_dim_for_ckpt(
+        self, obs: dict[str, NDArray[np.floating]], ckpt_args: dict | None, act_dim: int
+    ) -> int:
+        """Compute the obs dimension implied by a checkpoint's feature flags and the current builder."""
+        n, p, lk, g = self._feature_flags(ckpt_args)
+        obs_jax = {k: np.asarray(v)[None, ...] for k, v in obs.items()}
+        base = build_navigation_features(
+            obs_jax, n_nearest_obstacles=n, include_progress=p, lookahead_gates=lk, gravity_obs=g
+        )
+        return int(base.shape[-1]) + act_dim
+
     def _resolve_architecture(self, checkpoint: dict, state: dict) -> tuple[int, int, float, float | None]:
         """Recover architecture settings from checkpoint metadata, falling back to old inference."""
         arch = checkpoint.get("arch")
@@ -152,35 +190,35 @@ class NavRLController(Controller):
         except Exception:
             return None
 
-    def _resolve_model(self, config: dict, obs_dim: int, act_dim: int) -> tuple[Path, dict]:
-        """Resolve and load a compatible checkpoint from config, env var, or local runs."""
-        configured = getattr(config.controller, "model_path", None)
-        if configured:
-            path = Path(configured)
-            if not path.is_absolute():
-                path = Path(__file__).parent / path
-            if not path.exists():
-                raise FileNotFoundError(f"Configured model_path does not exist: {path}")
-            checkpoint = self._load_checkpoint(path)
-            if checkpoint is None or not self._checkpoint_matches(checkpoint, obs_dim=obs_dim, act_dim=act_dim):
-                raise RuntimeError(
-                    f"Configured model_path '{path}' does not match the current controller "
-                    f"architecture (obs_dim={obs_dim}, act_dim={act_dim})."
-                )
-            return path, checkpoint
+    def _resolve_model(
+        self, config: dict, obs: dict[str, NDArray[np.floating]], act_dim: int
+    ) -> tuple[Path, dict]:
+        """Resolve and load a compatible checkpoint from config, env var, or local runs.
 
-        env_path = os.environ.get("NAV_RL_CKPT")
-        if env_path:
-            path = Path(env_path)
+        Each candidate is validated against the obs dimension implied by *its own* training args, so
+        a checkpoint trained with different feature flags than the current config defaults still
+        loads (the controller then adopts those flags via :meth:`_apply_ckpt_args`).
+        """
+        # Explicit choices (model_path / NAV_RL_CKPT) are loaded and validated against their own args.
+        for source, raw, base_dir in (
+            ("model_path", getattr(config.controller, "model_path", None), Path(__file__).parent),
+            ("NAV_RL_CKPT", os.environ.get("NAV_RL_CKPT"), Path.cwd()),
+        ):
+            if not raw:
+                continue
+            path = Path(raw)
             if not path.is_absolute():
-                path = Path.cwd() / path
+                path = base_dir / path
             if not path.exists():
-                raise FileNotFoundError(f"NAV_RL_CKPT does not exist: {path}")
+                raise FileNotFoundError(f"{source} does not exist: {path}")
             checkpoint = self._load_checkpoint(path)
-            if checkpoint is None or not self._checkpoint_matches(checkpoint, obs_dim=obs_dim, act_dim=act_dim):
+            if checkpoint is None:
+                raise RuntimeError(f"{source} '{path}' could not be loaded as a checkpoint.")
+            obs_dim = self._obs_dim_for_ckpt(obs, self._extract_args(checkpoint), act_dim)
+            if not self._checkpoint_matches(checkpoint, obs_dim=obs_dim, act_dim=act_dim):
                 raise RuntimeError(
-                    f"NAV_RL_CKPT '{path}' does not match the current controller architecture "
-                    f"(obs_dim={obs_dim}, act_dim={act_dim})."
+                    f"{source} '{path}' does not match the current controller architecture "
+                    f"(obs_dim={obs_dim} for its feature flags, act_dim={act_dim})."
                 )
             return path, checkpoint
 
@@ -192,7 +230,10 @@ class NavRLController(Controller):
         )
         for path in candidates:
             checkpoint = self._load_checkpoint(path)
-            if checkpoint is not None and self._checkpoint_matches(checkpoint, obs_dim=obs_dim, act_dim=act_dim):
+            if checkpoint is None:
+                continue
+            obs_dim = self._obs_dim_for_ckpt(obs, self._extract_args(checkpoint), act_dim)
+            if self._checkpoint_matches(checkpoint, obs_dim=obs_dim, act_dim=act_dim):
                 return path, checkpoint
         if not candidates:
             raise FileNotFoundError(
@@ -200,9 +241,9 @@ class NavRLController(Controller):
                 "Train the policy first or set controller.model_path."
             )
         raise FileNotFoundError(
-                "No compatible ppo_nav_drone_racing.ckpt found under lsy_drone_racing/control. "
-                f"Expected obs_dim={obs_dim}, act_dim={act_dim}. Train the policy first or set "
-                "controller.model_path to a matching checkpoint."
+            "No compatible ppo_nav_drone_racing.ckpt found under lsy_drone_racing/control. "
+            f"Expected act_dim={act_dim} with an obs layout the current feature builder can "
+            "reproduce. Train the policy first or set controller.model_path to a matching checkpoint."
         )
 
     def _base_obs(self, obs: dict[str, NDArray[np.floating]]) -> np.ndarray:

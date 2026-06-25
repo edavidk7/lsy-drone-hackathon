@@ -41,11 +41,11 @@ class Args:
     jax_device: str = "cpu"
     wandb_project_name: str = "ADR-PPO-Navigation"
     wandb_entity: str | None = None
-    config: str = "level2.toml"
+    config: str = "level0.toml"
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
 
-    total_timesteps: int = 40_000_000
-    learning_rate: float = 3e-4  # 1.5e-3 works on this problem too
+    total_timesteps: int = 10_000_000
+    learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
     num_envs: int = 2048
     num_steps: int = 16
     anneal_lr: bool = True
@@ -67,7 +67,7 @@ class Args:
     gate_progress_coef: float = 5.0
     gate_pass_bonus: float = 10.0
     success_bonus: float = 15.0
-    crash_penalty: float = 5.0
+    crash_penalty: float = 1.0
     init_logstd: float = -1
     init_logstd_last: float = 1.0
     act_coef: float = 0.01  # energy penalty on the collective-thrust action channel only

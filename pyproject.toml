@@ -47,6 +47,9 @@ deploy = [
 rl = ["torch == 2.8.0", "wandb"]
 # option[gamepad]: use a gamepad as input for your drone
 gamepad = ["pygame"]
+# option[debug-ui]: optional web dashboard to diagnose the controller (see lsy_drone_racing/debug_ui)
+# Include a websocket backend explicitly; bare uvicorn serves HTTP but cannot upgrade /ws.
+debug-ui = ["pyzmq", "fastapi", "uvicorn", "websockets"]
 
 [tool.setuptools.packages]
 find = {}

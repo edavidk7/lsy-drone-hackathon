@@ -225,6 +225,18 @@ class AttitudeMPC(Controller):
         self._config = config
         self._finished = False
 
+        # Optional debug UI: publish each control step over ZMQ when DEBUG_UI_ENABLE is set.
+        # Lazy + guarded so deployments without the env var (or without pyzmq) are unaffected.
+        self._prev_action = np.zeros(self._nu, dtype=np.float32)
+        self._dbg = None
+        try:
+            from lsy_drone_racing.debug_ui.publisher import get_publisher
+
+            self._dbg = get_publisher()
+            print(f"Attitude MPC publisher: {self._dbg=}")
+        except Exception:  # noqa: BLE001 - the debug UI must never break the controller.
+            self._dbg = None
+
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
@@ -278,6 +290,12 @@ class AttitudeMPC(Controller):
         self._acados_ocp_solver.solve()
         u0 = self._acados_ocp_solver.get(0, "u")
 
+        if self._dbg is not None:
+            # Attitude action layout is [roll, pitch, yaw, thrust] (acados input order, matching the
+            # env action space and the nav policy's attitude command).
+            self._dbg.publish(self._tick, obs, np.asarray(u0, dtype=np.float32), self._prev_action)
+        self._prev_action = np.asarray(u0, dtype=np.float32)
+
         return u0
 
     def step_callback(
@@ -297,3 +315,4 @@ class AttitudeMPC(Controller):
     def episode_callback(self):
         """Reset the integral error."""
         self._tick = 0
+        self._prev_action = np.zeros(self._nu, dtype=np.float32)

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Drone Controller Debug UI</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --border: #232a35; --text: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff; --pred: #f78166; --gate: #3fb950; --obs: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #6e7681; }
+  .dot.live { background: var(--gate); box-shadow: 0 0 8px var(--gate); }
+  header .meta { color: var(--muted); font-size: 12px; }
+  .layout { display: grid; grid-template-columns: 1fr 320px; gap: 12px; padding: 12px; }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 2px 4px 6px; }
+  #traj { height: 460px; } .ts { height: 200px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .v.small { font-size: 14px; font-weight: 500; }
+  .vec { font-variant-numeric: tabular-nums; color: var(--accent); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.flying { background: rgba(63,185,80,.15); color: var(--gate); }
+  .badge.done { background: rgba(210,153,34,.15); color: var(--obs); }
+  table.act { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  table.act td { padding: 3px 6px; border-bottom: 1px solid var(--border); }
+  table.act td.k { color: var(--muted); }
+  table.act td.v { text-align: right; color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="status-dot"></span>
+  <h1>Drone Controller Debug UI</h1>
+  <span class="meta" id="meta">waiting for controller…</span>
+</header>
+
+<div class="layout">
+  <div class="col">
+    <div class="panel"><h2>Trajectory — history &amp; 200 ms prediction</h2><div id="traj"></div></div>
+    <div class="panel"><h2>Position (m)</h2><div id="pos-ts" class="ts"></div></div>
+    <div class="panel"><h2>Action</h2><div id="act-ts" class="ts"></div></div>
+  </div>
+
+  <div class="col">
+    <div class="panel">
+      <h2>Status</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="k">Target gate</div><div class="v" id="s-gate">–</div></div>
+        <div class="stat"><div class="k">Speed</div><div class="v" id="s-speed">–</div></div>
+        <div class="stat" style="grid-column:1/3"><div class="k">State</div><div class="v small"><span class="badge flying" id="s-state">–</span></div></div>
+        <div class="stat" style="grid-column:1/3"><div class="k">Position</div><div class="v small vec" id="s-pos">–</div></div>
+        <div class="stat" style="grid-column:1/3"><div class="k">Velocity</div><div class="v small vec" id="s-vel">–</div></div>
+      </div>
+    </div>
+    <div class="panel"><h2>Current action (<span id="s-mode">–</span>)</h2><table class="act"><tbody id="s-action"></tbody></table></div>
+    <div class="panel"><h2>Link</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="k">Updates/s</div><div class="v" id="s-rate">0</div></div>
+        <div class="stat"><div class="k">Sim time</div><div class="v small" id="s-time">0.00 s</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PLOT_BG = "#161b22", GRID = "#232a35", FONT = "#8b949e";
+const baseLayout = (extra) => Object.assign({
+  paper_bgcolor: PLOT_BG, plot_bgcolor: PLOT_BG, font: { color: FONT, size: 11 },
+  margin: { l: 44, r: 12, t: 8, b: 32 }, showlegend: true,
+  legend: { orientation: "h", y: 1.12, x: 0, font: { size: 10 } },
+}, extra || {});
+const axis = { gridcolor: GRID, zerolinecolor: GRID, color: FONT };
+
+const ACT_LABELS = {
+  4: ["roll", "pitch", "yaw", "thrust"],
+  13: ["x","y","z","vx","vy","vz","ax","ay","az","yaw","r_rate","p_rate","y_rate"],
+};
+
+// --- 3D trajectory ---------------------------------------------------------
+Plotly.newPlot("traj", [
+  { type:"scatter3d", mode:"lines", name:"history", x:[],y:[],z:[], line:{color:"#58a6ff", width:4} },
+  { type:"scatter3d", mode:"lines", name:"prediction (200ms)", x:[],y:[],z:[], line:{color:"#f78166", width:6} },
+  { type:"scatter3d", mode:"markers", name:"drone", x:[],y:[],z:[], marker:{color:"#58a6ff", size:5} },
+  { type:"scatter3d", mode:"markers+text", name:"gates", x:[],y:[],z:[], marker:{color:"#3fb950", size:6, symbol:"square"}, textposition:"top center", textfont:{color:"#3fb950", size:10} },
+  { type:"scatter3d", mode:"markers", name:"obstacles", x:[],y:[],z:[], marker:{color:"#d29922", size:5, symbol:"diamond"} },
+], baseLayout({ scene: {
+  xaxis: Object.assign({title:"x"}, axis), yaxis: Object.assign({title:"y"}, axis),
+  zaxis: Object.assign({title:"z"}, axis), aspectmode:"data",
+  camera:{ eye:{x:1.4,y:1.4,z:1.0} }, bgcolor: PLOT_BG,
+}}), {displayModeBar:false, responsive:true});
+
+Plotly.newPlot("pos-ts", [
+  {mode:"lines", name:"x", x:[],y:[], line:{color:"#58a6ff"}},
+  {mode:"lines", name:"y", x:[],y:[], line:{color:"#3fb950"}},
+  {mode:"lines", name:"z", x:[],y:[], line:{color:"#f78166"}},
+], baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:true});
+
+let actInited = false;
+function initActPlot(n) {
+  const labels = ACT_LABELS[n] || Array.from({length:n}, (_,i)=>"a"+i);
+  const traces = labels.map((name)=>({mode:"lines", name, x:[], y:[]}));
+  Plotly.newPlot("act-ts", traces, baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:true});
+  actInited = true;
+}
+
+// --- live link -------------------------------------------------------------
+const $ = (id)=>document.getElementById(id);
+let frames = 0, lastRateT = performance.now();
+setInterval(()=>{ const now=performance.now(); $("s-rate").textContent=Math.round(frames*1000/(now-lastRateT)); frames=0; lastRateT=now; }, 1000);
+const fmt3 = (a)=> "[" + a.map(v=>v.toFixed(2)).join(", ") + "]";
+
+function render(f) {
+  frames++;
+  $("status-dot").classList.add("live");
+  $("meta").textContent = `connected · ${f.control_mode} · ${f.freq} Hz`;
+
+  const col = (arr, i)=>arr.map(p=>p[i]);
+  const hp = f.history.pos, pr = f.prediction.xyz;
+  Plotly.restyle("traj", { x:[col(hp,0), col(pr,0), [f.current.pos[0]]], y:[col(hp,1), col(pr,1), [f.current.pos[1]]], z:[col(hp,2), col(pr,2), [f.current.pos[2]]] }, [0,1,2]);
+  const gp = f.gates.pos, op = f.obstacles.pos;
+  Plotly.restyle("traj", {
+    x:[col(gp,0), col(op,0)], y:[col(gp,1), col(op,1)], z:[col(gp,2), col(op,2)],
+    text:[gp.map((_,i)=>"G"+i), op.map(()=>"")]
+  }, [3,4]);
+
+  const ht = f.history.t;
+  Plotly.restyle("pos-ts", { x:[ht,ht,ht], y:[col(hp,0),col(hp,1),col(hp,2)] }, [0,1,2]);
+
+  const ha = f.history.action;
+  const n = f.current.action.length;
+  if (n && !actInited) initActPlot(n);
+  if (n) {
+    const idx = Array.from({length:n},(_,i)=>i);
+    Plotly.restyle("act-ts", { x: idx.map(()=>ht), y: idx.map(i=>ha.map(a=>a[i] ?? null)) }, idx);
+  }
+
+  $("s-gate").textContent = f.current.target_gate < 0 ? "done" : f.current.target_gate;
+  $("s-speed").textContent = f.current.speed.toFixed(2) + " m/s";
+  $("s-pos").textContent = fmt3(f.current.pos);
+  $("s-vel").textContent = fmt3(f.current.vel);
+  $("s-time").textContent = f.t.toFixed(2) + " s";
+  $("s-mode").textContent = f.control_mode;
+  const done = f.current.target_gate < 0;
+  const st = $("s-state"); st.textContent = done ? "FINISHED" : "FLYING";
+  st.className = "badge " + (done ? "done" : "flying");
+
+  const labels = ACT_LABELS[n] || Array.from({length:n},(_,i)=>"a"+i);
+  $("s-action").innerHTML = f.current.action.map((v,i)=>`<tr><td class="k">${labels[i]}</td><td class="v">${v.toFixed(3)}</td></tr>`).join("");
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  $("meta").textContent = `connecting to ${proto}://${location.host}/ws…`;
+  ws.onopen = ()=>{ $("meta").textContent = "connected"; };
+  ws.onmessage = (e)=>{ const f = JSON.parse(e.data); if (f && f.history) render(f); };
+  ws.onclose = (e)=>{
+    $("status-dot").classList.remove("live");
+    const reason = e.reason ? ` (${e.reason})` : "";
+    $("meta").textContent = `disconnected — retrying… [code ${e.code}${reason}]`;
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = ()=> {
+    $("meta").textContent = `websocket error on ${proto}://${location.host}/ws`;
+    ws.close();
+  };
+}
+connect();
+</script>
+</body>
+</html>
