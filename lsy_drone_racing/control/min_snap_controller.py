@@ -163,12 +163,19 @@ class MinSnapController(Controller):
         self._waypoints = wp
 
     def _repair_clearance(self, wp: NDArray, knots: NDArray, max_iters: int = 25):
-        """Insert waypoints to remove residual pole keep-out violations along the fitted spline."""
+        """Insert waypoints to remove residual pole and gate-frame violations along the spline.
+
+        The soft collision penalty only runs inside the (optional) L-BFGS pass, and even then the
+        pole-repair below can re-insert waypoints that bow the quintic into a gate frame. This pass
+        is the deterministic, always-on guarantee for *both* obstacle types: at each iteration it
+        finds the single worst keep-out violation -- pole (push the curve radially out) or gate frame
+        (pull the curve back to the opening center) -- pins a waypoint there, and repeats until clear.
+        """
         for _ in range(max_iters):
             spl = make_interp_spline(knots, wp, k=5)
             ts = np.linspace(0.0, knots[-1], 1200)
             p = spl(ts)
-            # Worst (most negative) clearance to any pole across all samples.
+            # Worst (most negative) clearance to any pole or gate frame across all samples.
             worst_pen, worst_t, worst_fix = 0.0, None, None
             for cx, cy in self._poles_xy:
                 d = np.hypot(p[:, 0] - cx, p[:, 1] - cy) - self._pole_r
@@ -181,6 +188,14 @@ class MinSnapController(Controller):
                     fix = p[k].copy()
                     fix[:2] = np.array([cx, cy]) + direction * (self._pole_r + 0.05)
                     worst_fix = fix
+            for i in range(len(self._gates_pos)):
+                local = self._gates_rot[i].apply(p - self._gates_pos[i], inverse=True)
+                clr = self._frame_clearance(local)
+                k = int(np.argmin(clr))
+                if clr[k] < worst_pen:
+                    worst_pen = clr[k]
+                    worst_t = ts[k]
+                    worst_fix = self._gate_center_fix(p[k], i)
             if worst_t is None:  # all clear
                 break
             i = int(np.searchsorted(knots, worst_t))
@@ -197,6 +212,19 @@ class MinSnapController(Controller):
             seg = np.linalg.norm(np.diff(wp, axis=0), axis=1)
             knots = np.concatenate([[0.0], np.cumsum(np.maximum(seg, 0.05))]) / self.SPEED
         return wp, knots
+
+    def _gate_center_fix(self, point: NDArray[np.floating], i: int) -> NDArray[np.floating]:
+        """World point pulled onto gate ``i``'s opening axis, keeping its along-normal depth.
+
+        A frame violation means the curve reached the gate plane off-center. The drone must pass
+        *through* the opening (not around it), so the only safe repair is to pin that point to the
+        opening center in the gate's y-z plane. We keep the local x (depth along the normal) so the
+        correction sits at the same point along the crossing, just re-centered.
+        """
+        local = self._gates_rot[i].apply(point - self._gates_pos[i], inverse=True)
+        local[1] = 0.0  # centre in the in-plane axes; the safe zone is only ~2 cm wide anyway
+        local[2] = 0.0
+        return self._gates_rot[i].apply(local) + self._gates_pos[i]
 
     def _build_waypoints(self, start_pos: NDArray[np.floating]):
         """Return (waypoints, indices_of_free_via_points)."""
