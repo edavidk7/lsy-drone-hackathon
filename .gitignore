@@ -20,3 +20,6 @@ c_generated_code/
 .venv/
 ros_ws/
 acados/
+wandb/
+lsy_drone_racing/control/*-*-*
+lsy_drone_racing/control/*.ckpt

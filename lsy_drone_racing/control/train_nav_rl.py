@@ -2,7 +2,7 @@
 
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from crazyflow.envs.norm_actions_wrapper import NormalizeActions
+from drone_models.core import load_params
 from gymnasium import spaces
 from gymnasium.vector import VectorActionWrapper, VectorEnv, VectorObservationWrapper, VectorRewardWrapper
 from gymnasium.vector.utils import batch_space
@@ -24,7 +26,6 @@ from torch import Tensor
 from torch.distributions.normal import Normal
 
 import wandb
-from drone_models.core import load_params
 from lsy_drone_racing.envs.drone_race import VecDroneRaceEnv
 from lsy_drone_racing.envs.race_core import obs as race_obs
 from lsy_drone_racing.envs.utils import gate_passed
@@ -41,44 +42,42 @@ class Args:
     wandb_project_name: str = "ADR-PPO-Navigation"
     wandb_entity: str | None = None
     config: str = "level2.toml"
+    resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
 
-    total_timesteps: int = 10_000_000
-    learning_rate: float = 1.5e-3
+    total_timesteps: int = 40_000_000
+    learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
     num_envs: int = 2048
     num_steps: int = 16
     anneal_lr: bool = True
+    min_learning_rate: float = 5e-5
     gamma: float = 0.99
     gae_lambda: float = 0.95
     num_minibatches: int = 8
     update_epochs: int = 8
     norm_adv: bool = True
-    clip_coef: float = 0.2
+    clip_coef: float = 0.23  # 0.23 also worked well
     clip_vloss: bool = True
-    ent_coef: float = 0.007
-    vf_coef: float = 0.5
+    ent_coef: float = 0.02
+    vf_coef: float = 0.7
     max_grad_norm: float = 1.0
-    target_kl: float | None = None
+    target_kl: float | None = None  # can be none
 
-    gate_progress_coef: float = 8.0
-    gate_alignment_coef: float = 3.0
-    gate_plane_progress_coef: float = 4.0
-    gate_proximity_coef: float = 2.0  # dense, always-positive proximity reward (removes hover fixed point)
-    gate_proximity_sharpness: float = 2.0  # exp(-sharpness * dist) shaping
-    backward_progress_coef: float = 4.0
-    gate_pass_bonus: float = 20.0
-    success_bonus: float = 20.0
-    crash_penalty: float = 3.0
-    wrong_gate_pass_penalty: float = 8.0
-    step_penalty: float = 1.0
-    rpy_coef: float = 0.06  # penalty on drone tilt (roll/pitch) magnitude
+    actor_hdim: int = 256
+    critic_hdim: int = 256
+    gate_progress_coef: float = 5.0
+    gate_pass_bonus: float = 10.0
+    success_bonus: float = 10.0
+    crash_penalty: float = 1.0
+    init_logstd: float = -1
+    init_logstd_last: float = 1.0
     act_coef: float = 0.01  # energy penalty on the collective-thrust action channel only
-    d_act_main_coef: float = 0.25  # jerk penalty on the roll/pitch/yaw action channels
+    d_act_main_coef: float = 0.1  # jerk penalty on the roll/pitch/yaw action channels
     d_act_aux_coef: float = 0.1  # jerk penalty on the collective-thrust action channel
     max_angle: float = float(np.pi / 2)  # rad, max commanded roll/pitch
-    max_yaw: float = 0.0  # rad, max commanded yaw (0 disables yaw control, like the original RL)
+    max_yaw: float = float(np.pi / 2)  # rad, max commanded yaw 
     n_nearest_obstacles: int = 2
-    history_steps: int = 2
     checkpoint_every_iterations: int = 10
+    episode_step_limit: int = 1500
 
     batch_size: int = 0
     minibatch_size: int = 0
@@ -90,6 +89,7 @@ class Args:
         args.batch_size = int(args.num_envs * args.num_steps)
         args.minibatch_size = int(args.batch_size // args.num_minibatches)
         args.num_iterations = max(1, args.total_timesteps // args.batch_size)
+        print(f"Created args with {args.batch_size=}, {args.minibatch_size=}, {args.num_iterations=}")
         return args
 
 
@@ -138,11 +138,13 @@ def _normalize_obs(obs: dict[str, Array]) -> dict[str, Array]:
     return normalized
 
 
+@jax.jit
 def _quat_conjugate(quat: Array) -> Array:
     """Return xyzw quaternion conjugate."""
     return jp.concatenate([-quat[..., :3], quat[..., 3:4]], axis=-1)
 
 
+@jax.jit
 def _quat_multiply(lhs: Array, rhs: Array) -> Array:
     """Multiply xyzw quaternions."""
     lx, ly, lz, lw = [lhs[..., i] for i in range(4)]
@@ -152,6 +154,31 @@ def _quat_multiply(lhs: Array, rhs: Array) -> Array:
     )
 
 
+@jax.jit
+def _quat_to_rotmat(quat: Array) -> Array:
+    """Convert an xyzw quaternion to a flattened 3x3 rotation matrix, shape ``(..., 9)``.
+
+    A rotation matrix is a continuous attitude representation that avoids the quaternion
+    double-cover ambiguity (``q`` and ``-q`` are the same rotation), which is the convention used
+    by the Swift paper and is known to be friendlier to neural-network inputs than quaternions.
+    """
+    x, y, z, w = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    r00 = 1.0 - 2.0 * (yy + zz)
+    r01 = 2.0 * (xy - wz)
+    r02 = 2.0 * (xz + wy)
+    r10 = 2.0 * (xy + wz)
+    r11 = 1.0 - 2.0 * (xx + zz)
+    r12 = 2.0 * (yz - wx)
+    r20 = 2.0 * (xz - wy)
+    r21 = 2.0 * (yz + wx)
+    r22 = 1.0 - 2.0 * (xx + yy)
+    return jp.stack([r00, r01, r02, r10, r11, r12, r20, r21, r22], axis=-1)
+
+
+@jax.jit
 def _rotate_world_to_body(vec: Array, quat: Array) -> Array:
     """Rotate vectors from world frame into body frame using xyzw quaternions."""
     quat_inv = _quat_conjugate(quat)
@@ -159,12 +186,14 @@ def _rotate_world_to_body(vec: Array, quat: Array) -> Array:
     return _quat_multiply(_quat_multiply(quat_inv, vec_quat), quat)[..., :3]
 
 
+@jax.jit
 def _rotate_body_to_world(vec: Array, quat: Array) -> Array:
     """Rotate vectors from body frame into world frame using xyzw quaternions."""
     vec_quat = jp.concatenate([vec, jp.zeros((*vec.shape[:-1], 1), dtype=vec.dtype)], axis=-1)
     return _quat_multiply(_quat_multiply(quat, vec_quat), _quat_conjugate(quat))[..., :3]
 
 
+@jax.jit
 def _target_gate_metrics(obs: dict[str, Array]) -> tuple[Array, Array, Array]:
     """Compute target-gate-relative features from an observation dict."""
     target_gate = obs["target_gate"]
@@ -179,16 +208,31 @@ def _target_gate_metrics(obs: dict[str, Array]) -> tuple[Array, Array, Array]:
 
 
 def _nearest_obstacle_features(obs: dict[str, Array], n_nearest: int) -> Array:
-    """Return nearest obstacle offsets in the drone body frame."""
+    """Return the ``n_nearest`` obstacles' body-frame offsets, each tagged with its sensed flag.
+
+    Two deliberate choices:
+    - Membership is the ``n_nearest`` closest obstacles, but the selected slots are then ordered by
+      **track index** (not by distance). This removes the slot-swap discontinuity that pure
+      distance-sorting introduces when two selected obstacles are near-equidistant: with a fixed
+      index order their feature 3-vectors never swap places. (The membership boundary - a third
+      obstacle becoming nearer than a selected one - remains discontinuous; that is the inherent
+      k<N wart and is unavoidable without feeding all obstacles.)
+    - Each obstacle's ``obstacles_visited`` flag is appended. Until an obstacle is within
+      sensor_range its reported position is the nominal (pre-randomization) guess and snaps to the
+      true position once sensed; the flag lets the policy distinguish a confirmed pole from a guess.
+    """
     obstacle_delta_world = obs["obstacles_pos"] - obs["pos"][:, None, :]
     obstacle_delta_body = _rotate_world_to_body(obstacle_delta_world.reshape(-1, 3), jp.repeat(obs["quat"], obstacle_delta_world.shape[1], axis=0)).reshape(
         obstacle_delta_world.shape
     )
     dists = jp.linalg.norm(obstacle_delta_body, axis=-1)
     nearest_ids = jp.argsort(dists, axis=-1)[..., :n_nearest]
+    # Re-order the selected indices by track index so each slot is tied to a fixed obstacle ordering.
+    nearest_ids = jp.sort(nearest_ids, axis=-1)
     env_ids = jp.arange(obstacle_delta_body.shape[0])[:, None]
     nearest = obstacle_delta_body[env_ids, nearest_ids]
-    return nearest.reshape(obstacle_delta_body.shape[0], -1)
+    visited = obs["obstacles_visited"].astype(jp.float32)[env_ids, nearest_ids][..., None]
+    return jp.concatenate([nearest, visited], axis=-1).reshape(obstacle_delta_body.shape[0], -1)
 
 
 @partial(jax.jit, static_argnames=("n_nearest_obstacles",))
@@ -196,10 +240,13 @@ def build_navigation_features(obs: dict[str, Array], n_nearest_obstacles: int) -
     """Build a compact navigation observation from the privileged environment state."""
     obs = _normalize_obs(obs)
     gate_delta_world, gate_delta_body, gate_quat_rel = _target_gate_metrics(obs)
+    # Encode the relative gate attitude as a 9-D rotation matrix instead of a 4-D quaternion to
+    # avoid the quaternion double-cover ambiguity (matches the Swift paper's observation design).
+    gate_rotmat_rel = _quat_to_rotmat(gate_quat_rel)
     nearest_obstacles = _nearest_obstacle_features(obs, n_nearest_obstacles)
     # Progress is encoded by visited_ratio; the raw target-gate index is dropped (poor as a feature).
     visited_ratio = jp.mean(obs["gates_visited"].astype(jp.float32), axis=-1, keepdims=True)
-    return jp.concatenate([gate_delta_world, gate_delta_body, gate_quat_rel, obs["vel"], obs["ang_vel"], nearest_obstacles, visited_ratio], axis=-1)
+    return jp.concatenate([gate_delta_world, gate_delta_body, gate_rotmat_rel, obs["vel"], obs["ang_vel"], nearest_obstacles, visited_ratio], axis=-1)
 
 
 @jax.jit
@@ -209,19 +256,11 @@ def compute_navigation_reward(
     reward: Array,
     terminated: Array,
     gate_progress_coef: float,
-    gate_alignment_coef: float,
-    gate_plane_progress_coef: float,
-    gate_proximity_coef: float,
-    gate_proximity_sharpness: float,
-    backward_progress_coef: float,
     gate_pass_bonus: float,
     success_bonus: float,
     crash_penalty: float,
-    wrong_gate_pass_penalty: float,
-    step_penalty: float,
-    rpy_coef: float,
-) -> tuple[Array, Array, Array]:
-    """Shape reward with gate progress, gate passes, success, and crash penalties."""
+) -> tuple[Array, Array, Array, Array]:
+    """Shape reward with simple gate progress, gate passes, success, and crash penalties."""
     prev_obs = _normalize_obs(prev_obs)
     next_obs = _normalize_obs(next_obs)
     prev_target = prev_obs["target_gate"]
@@ -232,24 +271,6 @@ def compute_navigation_reward(
     prev_dist = jp.linalg.norm(prev_gate_pos - prev_obs["pos"], axis=-1)
     next_dist_to_prev = jp.linalg.norm(prev_gate_pos - next_obs["pos"], axis=-1)
     progress_reward = gate_progress_coef * (prev_dist - next_dist_to_prev)
-    _, prev_gate_delta_body, _ = _target_gate_metrics(prev_obs)
-    next_gate_delta_world, next_gate_delta_body, _ = _target_gate_metrics(next_obs)
-    prev_plane_dist = jp.abs(prev_gate_delta_body[:, 0])
-    next_plane_dist = jp.abs(next_gate_delta_body[:, 0])
-    plane_progress_reward = gate_plane_progress_coef * (prev_plane_dist - next_plane_dist)
-    next_lateral_error = jp.linalg.norm(next_gate_delta_body[:, 1:3], axis=-1)
-    forward_progress = (prev_plane_dist - next_plane_dist) > 0
-    alignment_reward = gate_alignment_coef * jp.exp(-4.0 * next_lateral_error) * forward_progress.astype(jp.float32)
-    backward_penalty = backward_progress_coef * jp.maximum(next_dist_to_prev - prev_dist, 0.0)
-    # Dense, always-positive proximity to the current target gate (mirrors the original RL's
-    # exp(-dist) tracking reward): hovering far away earns little, so doing nothing is not a free
-    # local optimum, and the gradient pulls the drone toward the gate.
-    next_dist_to_target = jp.linalg.norm(next_gate_delta_world, axis=-1)
-    proximity_reward = gate_proximity_coef * jp.exp(-gate_proximity_sharpness * next_dist_to_target)
-    # Tilt penalty: how far the drone's body-up axis leans from world-up (penalizes extreme roll/pitch).
-    up = jp.broadcast_to(jp.array([0.0, 0.0, 1.0]), next_obs["quat"].shape[:-1] + (3,))
-    body_up = _rotate_body_to_world(up, next_obs["quat"])
-    tilt = jp.linalg.norm(body_up[..., :2], axis=-1)
 
     gate_advanced = next_target > prev_target
     success = (prev_target == (n_gates - 1)) & (next_target == -1)
@@ -258,15 +279,11 @@ def compute_navigation_reward(
     target_gate_oh = jp.arange(n_gates)[None, :] == jp.clip(prev_target[:, None], 0, n_gates - 1)
     wrong_gate_passes = jp.any(all_gate_passes & ~target_gate_oh, axis=-1)
 
-    shaped = reward + progress_reward + plane_progress_reward + alignment_reward + proximity_reward
+    shaped = reward + progress_reward
     shaped += gate_pass_bonus * gate_advanced.astype(jp.float32)
     shaped += success_bonus * success.astype(jp.float32)
     shaped -= crash_penalty * crash.astype(jp.float32)
-    shaped -= backward_penalty
-    shaped -= wrong_gate_pass_penalty * wrong_gate_passes.astype(jp.float32)
-    shaped -= rpy_coef * tilt
-    shaped -= step_penalty
-    return shaped, wrong_gate_passes, success
+    return shaped, gate_advanced, wrong_gate_passes, success
 
 
 class NavigationObservation(VectorObservationWrapper):
@@ -284,87 +301,54 @@ class NavigationObservation(VectorObservationWrapper):
         return build_navigation_features(observations, self.n_nearest_obstacles)
 
 
-def _update_history(obs_hist: Array, act_hist: Array, obs_vec: Array, action: Array, history_steps: int) -> tuple[Array, Array]:
-    """Append the latest observation and action to fixed-length histories."""
-    if history_steps <= 0:
-        return obs_hist, act_hist
-    next_obs_hist = jp.concatenate([obs_hist[:, 1:, :], obs_vec[:, None, :]], axis=1)
-    next_act_hist = jp.concatenate([act_hist[:, 1:, :], action[:, None, :]], axis=1)
-    return next_obs_hist, next_act_hist
+class PrevAction(VectorObservationWrapper):
+    """Append the single previous action ``a_{t-1}`` to each observation.
 
+    Matches the Swift paper, whose only temporal feedback into the policy is the action applied in
+    the previous step (no observation/action history stack). The action attached to the observation
+    returned at step ``t`` is exactly the action just applied (``a_t``), so that the observation
+    consumed at the next decision carries ``a_{t-1}``. On the autoreset step (NEXT_STEP autoreset,
+    where the env ignores the passed action), the previous action is zeroed so the first observation
+    of a new episode carries no stale action.
+    """
 
-class StackObsAct(VectorObservationWrapper):
-    """Append a fixed number of past observation/action pairs to each observation."""
-
-    def __init__(self, env: VectorEnv, history_steps: int):
+    def __init__(self, env: VectorEnv):
         super().__init__(env)
-        self.history_steps = history_steps
         obs_dim = int(np.prod(self.single_observation_space.shape))
         act_dim = int(np.prod(self.single_action_space.shape))
-        self._obs_dim = obs_dim
         self._act_dim = act_dim
-        self._obs_hist = jp.zeros((self.num_envs, history_steps, obs_dim), dtype=jp.float32)
-        self._act_hist = jp.zeros((self.num_envs, history_steps, act_dim), dtype=jp.float32)
-        total_dim = obs_dim + history_steps * (obs_dim + act_dim)
+        self._prev_done = jp.zeros(self.num_envs, dtype=bool)
+        total_dim = obs_dim + act_dim
         self.single_observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32)
         self.observation_space = batch_space(self.single_observation_space, self.num_envs)
 
-    def _augment(self, obs_vec: Array) -> Array:
-        if self.history_steps <= 0:
-            return obs_vec
-        return jp.concatenate([obs_vec, self._obs_hist.reshape(self.num_envs, -1), self._act_hist.reshape(self.num_envs, -1)], axis=-1)
-
     def reset(self, *, seed: int | list[int] | None = None, options: dict | None = None):
         obs, info = self.env.reset(seed=seed, options=options)
-        self._obs_hist = jp.zeros((self.num_envs, self.history_steps, self._obs_dim), dtype=jp.float32)
-        self._act_hist = jp.zeros((self.num_envs, self.history_steps, self._act_dim), dtype=jp.float32)
-        return self._augment(obs), info
+        self._prev_done = jp.zeros(self.num_envs, dtype=bool)
+        zeros = jp.zeros((self.num_envs, self._act_dim), dtype=jp.float32)
+        return jp.concatenate([obs, zeros], axis=-1), info
 
     def step(self, action: Array):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        augmented_obs = self._augment(obs)
-        self._obs_hist, self._act_hist = _update_history(self._obs_hist, self._act_hist, obs, action, self.history_steps)
-        if self.history_steps > 0:
-            # Clear history for envs that just ended so the next (autoreset) episode is not
-            # contaminated with stale observations/actions from the previous one.
-            keep = (~(terminated | truncated)).astype(jp.float32)[:, None, None]
-            self._obs_hist = self._obs_hist * keep
-            self._act_hist = self._act_hist * keep
+        # If the previous step ended the episode, this is an autoreset step: the env ignored
+        # ``action``, so the fresh observation carries a zero previous action. Otherwise attach the
+        # just-applied action, which becomes ``a_{t-1}`` at the next decision.
+        prev_action = jp.where(self._prev_done[:, None], jp.zeros_like(action), action)
+        augmented_obs = jp.concatenate([obs, prev_action], axis=-1)
+        self._prev_done = terminated | truncated
         return augmented_obs, reward, terminated, truncated, info
 
 
 class NavigationReward(VectorRewardWrapper):
     """Add dense gate-to-gate shaping on top of the sparse base environment reward."""
 
-    def __init__(
-        self,
-        env: VectorEnv,
-        gate_progress_coef: float,
-        gate_alignment_coef: float,
-        gate_plane_progress_coef: float,
-        gate_proximity_coef: float,
-        gate_proximity_sharpness: float,
-        backward_progress_coef: float,
-        gate_pass_bonus: float,
-        success_bonus: float,
-        crash_penalty: float,
-        wrong_gate_pass_penalty: float,
-        step_penalty: float,
-        rpy_coef: float,
-    ):
+    def __init__(self, env: VectorEnv, gate_progress_coef: float, gate_pass_bonus: float, success_bonus: float, crash_penalty: float):
         super().__init__(env)
         self.gate_progress_coef = gate_progress_coef
-        self.gate_alignment_coef = gate_alignment_coef
-        self.gate_plane_progress_coef = gate_plane_progress_coef
-        self.gate_proximity_coef = gate_proximity_coef
-        self.gate_proximity_sharpness = gate_proximity_sharpness
-        self.backward_progress_coef = backward_progress_coef
         self.gate_pass_bonus = gate_pass_bonus
         self.success_bonus = success_bonus
         self.crash_penalty = crash_penalty
-        self.wrong_gate_pass_penalty = wrong_gate_pass_penalty
-        self.step_penalty = step_penalty
-        self.rpy_coef = rpy_coef
+
         self._prev_obs: dict[str, Array] | None = None
         self._prev_done: Array | None = None
 
@@ -377,23 +361,8 @@ class NavigationReward(VectorRewardWrapper):
     def step(self, action: Array):
         observations, rewards, terminations, truncations, infos = self.env.step(action)
         assert self._prev_obs is not None and self._prev_done is not None
-        shaped_rewards, wrong_gate_passes, success = compute_navigation_reward(
-            self._prev_obs,
-            observations,
-            rewards,
-            terminations,
-            self.gate_progress_coef,
-            self.gate_alignment_coef,
-            self.gate_plane_progress_coef,
-            self.gate_proximity_coef,
-            self.gate_proximity_sharpness,
-            self.backward_progress_coef,
-            self.gate_pass_bonus,
-            self.success_bonus,
-            self.crash_penalty,
-            self.wrong_gate_pass_penalty,
-            self.step_penalty,
-            self.rpy_coef,
+        shaped_rewards, gate_passed, wrong_gate_passes, success = compute_navigation_reward(
+            self._prev_obs, observations, rewards, terminations, self.gate_progress_coef, self.gate_pass_bonus, self.success_bonus, self.crash_penalty
         )
         # On the first transition of a new episode (the env autoreset on the previous step), the
         # prev/next observations straddle two episodes; the shaped terms (progress, gate passes,
@@ -401,14 +370,35 @@ class NavigationReward(VectorRewardWrapper):
         # the raw base reward for those transitions.
         valid = ~self._prev_done
         shaped_rewards = jp.where(valid, shaped_rewards, rewards)
+        gate_passed = gate_passed & valid
         wrong_gate_passes = wrong_gate_passes & valid
         success = success & valid
         infos = dict(infos)
+        infos["gate_passed"] = gate_passed
         infos["wrong_gate_passes"] = wrong_gate_passes
         infos["success"] = success
         self._prev_obs = observations
         self._prev_done = terminations | truncations
         return observations, shaped_rewards, terminations, truncations, infos
+
+
+@partial(jax.jit, static_argnames=("control_mode",))
+def _action_penalty(
+    reward: Array, action: Array, last_action: Array, done: Array, act_coef: float, d_act_main_coef: float, d_act_aux_coef: float, control_mode: str
+) -> tuple[Array, Array]:
+    """Apply the energy + jerk penalties and return ``(reward, next_last_action)`` in one fused call.
+
+    ``act_coef`` (collective-thrust energy) is only applied in attitude mode. ``next_last_action`` is
+    zeroed for envs that just ended so the next episode's first jerk term is not computed across an
+    episode boundary.
+    """
+    action_diff = action - last_action
+    if control_mode == "attitude":
+        reward = reward - act_coef * action[:, 3] ** 2  # thrust energy only
+    reward = reward - d_act_main_coef * jp.sum(action_diff[:, :3] ** 2, axis=-1)
+    reward = reward - d_act_aux_coef * jp.sum(action_diff[:, 3:] ** 2, axis=-1)
+    next_last_action = jp.where(done[:, None], jp.zeros_like(action), action)
+    return reward, next_last_action
 
 
 class ActionPenalty(VectorRewardWrapper):
@@ -420,11 +410,12 @@ class ActionPenalty(VectorRewardWrapper):
     coefficient on roll/pitch/yaw and the "aux" coefficient on thrust.
     """
 
-    def __init__(self, env: VectorEnv, act_coef: float = 0.01, d_act_main_coef: float = 0.25, d_act_aux_coef: float = 0.1):
+    def __init__(self, env: VectorEnv, act_coef: float = 0.01, d_act_main_coef: float = 0.25, d_act_aux_coef: float = 0.1, control_mode: str = "attitude"):
         super().__init__(env)
         self.act_coef = act_coef
         self.d_act_main_coef = d_act_main_coef
         self.d_act_aux_coef = d_act_aux_coef
+        self.control_mode = control_mode
         self._last_action = jp.zeros((self.num_envs, self.single_action_space.shape[0]))
 
     def reset(self, *, seed: int | list[int] | None = None, options: dict | None = None):
@@ -434,17 +425,10 @@ class ActionPenalty(VectorRewardWrapper):
 
     def step(self, action: Array):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        action_diff = action - self._last_action
-        reward -= self.act_coef * action[:, 3] ** 2  # thrust energy only
-        reward -= self.d_act_main_coef * jp.sum(action_diff[:, :3] ** 2, axis=-1)
-        reward -= self.d_act_aux_coef * jp.sum(action_diff[:, 3:] ** 2, axis=-1)
-        # Forget the previous action for envs that just reset, so the next episode's first delta
-        # penalty is not computed across an episode boundary.
-        self._last_action = jp.where((terminated | truncated)[:, None], jp.zeros_like(action), action)
+        reward, self._last_action = _action_penalty(
+            reward, action, self._last_action, terminated | truncated, self.act_coef, self.d_act_main_coef, self.d_act_aux_coef, self.control_mode
+        )
         return obs, reward, terminated, truncated, info
-
-
-NAV_ACTION_DIM = 4  # policy action: [roll, pitch, yaw, thrust]
 
 
 def attitude_setpoint_from_action(action, thrust_min: float, thrust_max: float, max_angle: float, max_yaw: float = 0.0, xp=jp):
@@ -478,11 +462,17 @@ class AttitudeAction(VectorActionWrapper):
         self.thrust_min = float(params["thrust_min"]) * 4.0
         self.thrust_max = float(params["thrust_max"]) * 4.0
         self.max_angle = max_angle
-        self.single_action_space = spaces.Box(low=-1.0, high=1.0, shape=(NAV_ACTION_DIM,), dtype=np.float32)
+        self.single_action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         self.action_space = batch_space(self.single_action_space, self.num_envs)
+        # Jit the mapping with the (constant) thrust/angle bounds bound in, so the per-step call fuses
+        # clip/scale/concat into one dispatch and never rebuilds ``angle_scale`` on the host. Reuses
+        # attitude_setpoint_from_action so the training and inference paths cannot drift.
+        self._actions_jit = jax.jit(
+            partial(attitude_setpoint_from_action, thrust_min=self.thrust_min, thrust_max=self.thrust_max, max_angle=self.max_angle, max_yaw=self.max_yaw, xp=jp)
+        )
 
     def actions(self, actions: Array) -> Array:
-        return attitude_setpoint_from_action(actions, self.thrust_min, self.thrust_max, self.max_angle, self.max_yaw, xp=jp)
+        return self._actions_jit(actions)
 
 
 def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str = "cpu", torch_device: torch.device = torch.device("cpu"), args: Args | None = None) -> VectorEnv:
@@ -490,7 +480,6 @@ def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str 
     if args is None:
         args = Args.create()
     config_data = load_config(Path(__file__).parents[2] / "config" / config)
-    assert config_data.env.control_mode == "attitude", f"train_nav_rl is attitude-only; set control_mode='attitude' in {config}"
     env = VecDroneRaceEnv(
         num_envs=num_envs,
         freq=config_data.env.freq,
@@ -501,28 +490,22 @@ def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str 
         disturbances=getattr(config_data.env, "disturbances", None),
         randomizations=getattr(config_data.env, "randomizations", None),
         seed=config_data.env.seed,
-        max_episode_steps=1500,
+        max_episode_steps=args.episode_step_limit,
         device=jax_device,
     )
-    env = AttitudeAction(env, config_data.sim.drone_model, max_angle=args.max_angle, max_yaw=args.max_yaw)
+    control_mode = str(config_data.env.control_mode)
+    if control_mode == "attitude":
+        env = AttitudeAction(env, config_data.sim.drone_model, max_angle=args.max_angle, max_yaw=args.max_yaw)
+    elif control_mode == "state":
+        env = NormalizeActions(env)
+    else:
+        raise ValueError(f"Unsupported control_mode: {control_mode}")
     env = NavigationReward(
-        env,
-        gate_progress_coef=args.gate_progress_coef,
-        gate_alignment_coef=args.gate_alignment_coef,
-        gate_plane_progress_coef=args.gate_plane_progress_coef,
-        gate_proximity_coef=args.gate_proximity_coef,
-        gate_proximity_sharpness=args.gate_proximity_sharpness,
-        backward_progress_coef=args.backward_progress_coef,
-        gate_pass_bonus=args.gate_pass_bonus,
-        success_bonus=args.success_bonus,
-        crash_penalty=args.crash_penalty,
-        wrong_gate_pass_penalty=args.wrong_gate_pass_penalty,
-        step_penalty=args.step_penalty,
-        rpy_coef=args.rpy_coef,
+        env, gate_progress_coef=args.gate_progress_coef, gate_pass_bonus=args.gate_pass_bonus, success_bonus=args.success_bonus, crash_penalty=args.crash_penalty
     )
-    env = ActionPenalty(env, act_coef=args.act_coef, d_act_main_coef=args.d_act_main_coef, d_act_aux_coef=args.d_act_aux_coef)
+    env = ActionPenalty(env, act_coef=args.act_coef, d_act_main_coef=args.d_act_main_coef, d_act_aux_coef=args.d_act_aux_coef, control_mode=control_mode)
     env = NavigationObservation(env, n_nearest_obstacles=args.n_nearest_obstacles)
-    env = StackObsAct(env, history_steps=args.history_steps)
+    env = PrevAction(env)
     env = JaxToTorch(env, torch_device)
     return env
 
@@ -533,14 +516,60 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.
     return layer
 
 
+def grad_norm(parameters: list[nn.Parameter]) -> float:
+    """Return the L2 norm of the current gradients for a parameter list."""
+    grads = [p.grad.detach() for p in parameters if p.grad is not None]
+    if not grads:
+        return 0.0
+    return float(torch.sqrt(sum(torch.sum(g * g) for g in grads)).item())
+
+
+def clip_grad_group(parameters: list[nn.Parameter], max_norm: float) -> tuple[float, float]:
+    """Clip a parameter group and return its pre/post-clip gradient norms."""
+    pre_clip = grad_norm(parameters)
+    if parameters:
+        nn.utils.clip_grad_norm_(parameters, max_norm)
+    post_clip = grad_norm(parameters)
+    return pre_clip, post_clip
+
+
+def build_checkpoint_payload(agent: nn.Module, args: Args, obs_shape: tuple[int, ...], action_shape: tuple[int, ...]) -> dict[str, Any]:
+    """Serialize model weights together with the training args and architecture metadata."""
+    return {
+        "state_dict": agent.state_dict(),
+        "args": asdict(args),
+        "arch": {
+            "obs_shape": tuple(int(x) for x in obs_shape),
+            "action_shape": tuple(int(x) for x in action_shape),
+            "actor_hdim": int(args.actor_hdim),
+            "critic_hdim": int(args.critic_hdim),
+            "init_logstd": float(args.init_logstd),
+            "init_logstd_last": None if args.init_logstd_last is None else float(args.init_logstd_last),
+        },
+    }
+
+
 class RunningMeanStd(nn.Module):
     """Running mean/variance (Welford) for observation normalization, stored as module buffers."""
 
     def __init__(self, shape: tuple[int, ...], epsilon: float = 1e-4):
         super().__init__()
+        self._epsilon = epsilon
         self.register_buffer("mean", torch.zeros(shape))
         self.register_buffer("var", torch.ones(shape))
         self.register_buffer("count", torch.tensor(epsilon))
+
+    @torch.no_grad()
+    def reset(self) -> None:
+        """Reset the running statistics to their initial state (mean 0, var 1, count epsilon).
+
+        Used when warm-starting from a checkpoint: the restored statistics carry a large sample
+        count, which would otherwise pin the normalization to the source run's observation
+        distribution and prevent it from adapting to the env now being trained on.
+        """
+        self.mean.zero_()
+        self.var.fill_(1.0)
+        self.count.fill_(self._epsilon)
 
     @torch.no_grad()
     def update(self, x: Tensor) -> None:
@@ -563,22 +592,38 @@ class RunningMeanStd(nn.Module):
 class Agent(nn.Module):
     """Simple MLP actor-critic with running observation normalization."""
 
-    def __init__(self, obs_shape: tuple[int, ...], action_shape: tuple[int, ...], hdim: int = 256):
+    def __init__(
+        self,
+        obs_shape: tuple[int, ...],
+        action_shape: tuple[int, ...],
+        actor_hdim: int = 128,
+        critic_hdim: int = 256,
+        init_logstd: float = -1.0,
+        init_logstd_last: float | None = 1.0,
+    ):
         super().__init__()
         obs_dim = int(torch.tensor(obs_shape).prod())
         act_dim = int(torch.tensor(action_shape).prod())
         self.obs_rms = RunningMeanStd((obs_dim,))
-        self.critic = nn.Sequential(layer_init(nn.Linear(obs_dim, hdim)), nn.Tanh(), layer_init(nn.Linear(hdim, hdim)), nn.Tanh(), layer_init(nn.Linear(hdim, 1), std=1.0))
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, critic_hdim)), nn.Tanh(), layer_init(nn.Linear(critic_hdim, critic_hdim)), nn.Tanh(), layer_init(nn.Linear(critic_hdim, 1), std=1.0)
+        )
         # Final Tanh keeps the action mean in (-1, 1) with live gradients, so the policy does not
         # saturate against the wrapper's hard clip (which has zero gradient outside [-1, 1]).
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, hdim)), nn.Tanh(), layer_init(nn.Linear(hdim, hdim)), nn.Tanh(), layer_init(nn.Linear(hdim, act_dim), std=0.01), nn.Tanh()
+            layer_init(nn.Linear(obs_dim, actor_hdim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(actor_hdim, actor_hdim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(actor_hdim, act_dim), std=0.01),
+            nn.Tanh(),
         )
         # Asymmetric exploration: small std on roll/pitch/yaw, large std on thrust (last channel) so
         # the drone explores lift and learns to take off instead of collapsing to a hover.
-        init_logstd = torch.full((1, act_dim), -1.0)
-        init_logstd[0, -1] = 1.0
-        self.actor_logstd = nn.Parameter(init_logstd)
+        actor_logstd = torch.full((1, act_dim), float(init_logstd))
+        if init_logstd_last is not None:
+            actor_logstd[0, -1] = float(init_logstd_last)
+        self.actor_logstd = nn.Parameter(actor_logstd)
 
     @torch.compile
     def get_value(self, x: Tensor) -> Tensor:
@@ -606,21 +651,51 @@ def select_torch_device(use_cuda: bool) -> torch.device:
 def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_device: str, wandb_enabled: bool = False):
     """Train PPO on gate-to-gate navigation."""
     if wandb_enabled and wandb.run is None:
-        wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, config=vars(args))
+        wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, config=vars(args), save_code=True, monitor_gym=True)
 
     set_seeds(args.seed)
     print("Training on device:", device, "| Environment device:", jax_device)
     envs = make_envs(config=args.config, num_envs=args.num_envs, jax_device=jax_device, torch_device=device, args=args)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    checkpoint_payload = lambda: build_checkpoint_payload(agent, args, envs.single_observation_space.shape, envs.single_action_space.shape)
 
-    agent = Agent(envs.single_observation_space.shape, envs.single_action_space.shape).to(device)
+    agent = Agent(
+        envs.single_observation_space.shape,
+        envs.single_action_space.shape,
+        actor_hdim=args.actor_hdim,
+        critic_hdim=args.critic_hdim,
+        init_logstd=args.init_logstd,
+        init_logstd_last=args.init_logstd_last,
+    ).to(device)
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        if not resume_path.is_absolute():
+            resume_path = Path(__file__).parent / resume_path
+        ckpt = torch.load(resume_path, map_location=device)
+        state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+        try:
+            agent.load_state_dict(state)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Failed to resume from '{resume_path}'. The checkpoint must match the current "
+                f"obs/action dims and architecture (actor_hdim={args.actor_hdim}, "
+                f"critic_hdim={args.critic_hdim})."
+            ) from exc
+        # load_state_dict also restored obs_rms (mean/var/count). Its count carries the source run's
+        # full sample size, which would freeze observation normalization at the source-env statistics
+        # and stop it adapting to the env now being trained on (e.g. level0 -> level2, where gate and
+        # obstacle features have a wider, shifted distribution). Reset it so the normalizer
+        # recalibrates from the current env's observations (update() runs before the first forward
+        # pass each step, so there is no normalization shock).
+        agent.obs_rms.reset()
+        print(f"Resumed agent weights from {resume_path} (obs normalization reset to re-adapt)")
     optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     base_dir = model_path.parent if model_path is not None else Path(__file__).parent
     if wandb_enabled and wandb.run is not None and wandb.run.name:
         run_dir_name = _safe_run_name(wandb.run.name)
     else:
         run_dir_name = f"local_{time.strftime('%Y%m%d_%H%M%S')}"
-    checkpoint_dir = base_dir / run_dir_name
+    checkpoint_dir = base_dir / f"ppo-nav-training-{run_dir_name}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     print(f"Checkpoint directory: {checkpoint_dir}")
 
@@ -628,7 +703,8 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)  # terminations only, cuts the bootstrap
+    dones_full = torch.zeros((args.num_steps, args.num_envs)).to(device)  # term | trunc, cuts GAE accumulation
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     global_step = 0
@@ -638,29 +714,39 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
     next_done = torch.zeros(args.num_envs, device=device)  # term | trunc, for episode bookkeeping
     next_termination = torch.zeros(args.num_envs, device=device)  # terminations only, for GAE
     sum_rewards = torch.zeros(args.num_envs, device=device)
+    episode_gate_passes = torch.zeros(args.num_envs, device=device)
     episode_gate_hits = torch.zeros(args.num_envs, device=device)
     episode_obstacle_hits = torch.zeros(args.num_envs, device=device)
     episode_wrong_gate_passes = torch.zeros(args.num_envs, device=device)
     episode_success = torch.zeros(args.num_envs, device=device)
     reward_hist: list[float] = []
+    actor_params = list(agent.actor_mean.parameters()) + [agent.actor_logstd]
+    critic_params = list(agent.critic.parameters())
 
     for iteration in range(1, args.num_iterations + 1):
         iter_start = time.time()
+        iter_gate_passes = 0.0
         iter_gate_hits = 0.0
         iter_obstacle_hits = 0.0
+        iter_gate_pass_episodes = 0.0
         iter_gate_hit_episodes = 0.0
         iter_obstacle_hit_episodes = 0.0
         iter_wrong_gate_passes = 0.0
         iter_wrong_gate_pass_episodes = 0.0
         iter_success_episodes = 0.0
+        actor_grad_norm_pre = 0.0
+        actor_grad_norm_post = 0.0
+        critic_grad_norm_pre = 0.0
+        critic_grad_norm_post = 0.0
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            optimizer.param_groups[0]["lr"] = frac * args.learning_rate
+            optimizer.param_groups[0]["lr"] = max(args.min_learning_rate, frac * args.learning_rate)
 
         for step in range(args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_termination  # GAE cuts bootstrap only on true terminations
+            dones_full[step] = next_done  # post-episode (autoreset) state; cuts GAE accumulation + masks loss
 
             agent.obs_rms.update(next_obs)
             with torch.no_grad():
@@ -674,6 +760,7 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
             reward = torch.as_tensor(reward, device=device, dtype=torch.float32)
             terminations = torch.as_tensor(terminations, device=device)
             truncations = torch.as_tensor(truncations, device=device)
+            gate_passes = torch.as_tensor(infos["gate_passed"], device=device).float()
             gate_hits = torch.as_tensor(infos["gate_hits"], device=device).float()
             obstacle_hits = torch.as_tensor(infos["obstacle_hits"], device=device).float()
             wrong_gate_passes = torch.as_tensor(infos["wrong_gate_passes"], device=device).float()
@@ -681,10 +768,12 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
 
             rewards[step] = reward
             sum_rewards += reward
+            episode_gate_passes += gate_passes
             episode_gate_hits += gate_hits
             episode_obstacle_hits += obstacle_hits
             episode_wrong_gate_passes += wrong_gate_passes
             episode_success = torch.maximum(episode_success, success)
+            iter_gate_passes += gate_passes.sum().item()
             iter_gate_hits += gate_hits.sum().item()
             iter_obstacle_hits += obstacle_hits.sum().item()
             iter_wrong_gate_passes += wrong_gate_passes.sum().item()
@@ -693,35 +782,48 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
 
             if wandb_enabled and next_done.any():
                 done_rewards = sum_rewards[next_done.bool()]
+                done_gate_passes = episode_gate_passes[next_done.bool()]
                 done_gate_hits = episode_gate_hits[next_done.bool()]
                 done_obstacle_hits = episode_obstacle_hits[next_done.bool()]
                 done_wrong_gate_passes = episode_wrong_gate_passes[next_done.bool()]
                 done_success = episode_success[next_done.bool()]
+                iter_gate_pass_episodes += (done_gate_passes > 0).float().sum().item()
                 iter_gate_hit_episodes += (done_gate_hits > 0).float().sum().item()
                 iter_obstacle_hit_episodes += (done_obstacle_hits > 0).float().sum().item()
                 iter_wrong_gate_pass_episodes += (done_wrong_gate_passes > 0).float().sum().item()
                 iter_success_episodes += done_success.sum().item()
-                for r, g, o, w, s in zip(done_rewards, done_gate_hits, done_obstacle_hits, done_wrong_gate_passes, done_success):
+                for r, gp, g, o, w, s in zip(done_rewards, done_gate_passes, done_gate_hits, done_obstacle_hits, done_wrong_gate_passes, done_success):
                     reward_hist.append(r.item())
                     wandb.log(
-                        {"train/reward": r.item(), "train/gate_hits": g.item(), "train/obstacle_hits": o.item(), "train/wrong_gate_passes": w.item(), "train/success": s.item()},
+                        {
+                            "train/reward": r.item(),
+                            "train/gate_passes": gp.item(),
+                            "train/gate_hits": g.item(),
+                            "train/obstacle_hits": o.item(),
+                            "train/wrong_gate_passes": w.item(),
+                            "train/success": s.item(),
+                        },
                         step=global_step,
                     )
                 sum_rewards[next_done.bool()] = 0
+                episode_gate_passes[next_done.bool()] = 0
                 episode_gate_hits[next_done.bool()] = 0
                 episode_obstacle_hits[next_done.bool()] = 0
                 episode_wrong_gate_passes[next_done.bool()] = 0
                 episode_success[next_done.bool()] = 0
             elif next_done.any():
+                done_gate_passes = episode_gate_passes[next_done.bool()]
                 done_gate_hits = episode_gate_hits[next_done.bool()]
                 done_obstacle_hits = episode_obstacle_hits[next_done.bool()]
                 done_wrong_gate_passes = episode_wrong_gate_passes[next_done.bool()]
                 done_success = episode_success[next_done.bool()]
+                iter_gate_pass_episodes += (done_gate_passes > 0).float().sum().item()
                 iter_gate_hit_episodes += (done_gate_hits > 0).float().sum().item()
                 iter_obstacle_hit_episodes += (done_obstacle_hits > 0).float().sum().item()
                 iter_wrong_gate_pass_episodes += (done_wrong_gate_passes > 0).float().sum().item()
                 iter_success_episodes += done_success.sum().item()
                 sum_rewards[next_done.bool()] = 0
+                episode_gate_passes[next_done.bool()] = 0
                 episode_gate_hits[next_done.bool()] = 0
                 episode_obstacle_hits[next_done.bool()] = 0
                 episode_wrong_gate_passes[next_done.bool()] = 0
@@ -733,14 +835,20 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
                 if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_termination.float()
+                    next_nonterm = 1.0 - next_termination.float()  # cuts bootstrap on termination
+                    next_nondone = 1.0 - next_done.float()  # cuts GAE accumulation on any episode end
                     nextvalues = next_value
                 else:
-                    nextnonterminal = 1.0 - dones[t + 1]
+                    next_nonterm = 1.0 - dones[t + 1]
+                    next_nondone = 1.0 - dones_full[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                # Under NEXT_STEP autoreset the obs at the done step is the true terminal state, so a
+                # truncation keeps its bootstrap (next_nonterm=1) while still ending the GAE chain
+                # (next_nondone=0), so advantage never leaks across an episode boundary.
+                delta = rewards[t] + args.gamma * nextvalues * next_nonterm - values[t]
+                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * next_nondone * lastgaelam
             returns = advantages + values
+            valids = 1.0 - dones_full  # 0 for autoreset pseudo-transitions, which carry no real signal
 
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -748,6 +856,7 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
+        b_valids = valids.reshape(-1)
 
         b_inds = np.arange(args.batch_size)
         clipfracs = []
@@ -787,7 +896,8 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                actor_grad_norm_pre, actor_grad_norm_post = clip_grad_group(actor_params, args.max_grad_norm)
+                critic_grad_norm_pre, critic_grad_norm_post = clip_grad_group(critic_params, args.max_grad_norm)
                 optimizer.step()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
@@ -808,9 +918,15 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
                     "losses/approx_kl": approx_kl.item(),
                     "losses/clipfrac": float(np.mean(clipfracs)),
                     "losses/explained_variance": explained_var,
+                    "gradients/actor_norm": actor_grad_norm_pre,
+                    "gradients/actor_norm_clipped": actor_grad_norm_post,
+                    "gradients/critic_norm": critic_grad_norm_pre,
+                    "gradients/critic_norm_clipped": critic_grad_norm_post,
                     "charts/SPS": int(global_step / max(1e-6, (time.time() - train_start_time))),
+                    "charts/gate_pass_events": iter_gate_passes,
                     "charts/gate_hit_events": iter_gate_hits,
                     "charts/obstacle_hit_events": iter_obstacle_hits,
+                    "charts/gate_pass_episodes": iter_gate_pass_episodes,
                     "charts/gate_hit_episodes": iter_gate_hit_episodes,
                     "charts/obstacle_hit_episodes": iter_obstacle_hit_episodes,
                     "charts/wrong_gate_pass_events": iter_wrong_gate_passes,
@@ -822,20 +938,20 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
 
         print(
             f"Iter {iteration}/{args.num_iterations} took {time.time() - iter_start:.2f} seconds"
-            f" | gate_hits={iter_gate_hits:.0f} obstacle_hits={iter_obstacle_hits:.0f}"
+            f" | gate_passes={iter_gate_passes:.0f} gate_hits={iter_gate_hits:.0f} obstacle_hits={iter_obstacle_hits:.0f}"
             f" | wrong_gate_passes={iter_wrong_gate_passes:.0f}"
-            f" | gate_hit_eps={iter_gate_hit_episodes:.0f} obstacle_hit_eps={iter_obstacle_hit_episodes:.0f}"
+            f" | gate_pass_eps={iter_gate_pass_episodes:.0f} gate_hit_eps={iter_gate_hit_episodes:.0f} obstacle_hit_eps={iter_obstacle_hit_episodes:.0f}"
             f" wrong_gate_pass_eps={iter_wrong_gate_pass_episodes:.0f} success_eps={iter_success_episodes:.0f}"
         )
         if model_path is not None and args.checkpoint_every_iterations > 0:
             if iteration % args.checkpoint_every_iterations == 0:
                 ckpt_path = checkpoint_dir / f"{model_path.stem}_iter{iteration:03d}.ckpt"
-                torch.save(agent.state_dict(), ckpt_path)
+                torch.save(checkpoint_payload(), ckpt_path)
 
     print(f"Training for {global_step} steps took {time.time() - train_start_time:.2f} seconds.")
     if model_path is not None:
         final_model_path = checkpoint_dir / model_path.name
-        torch.save(agent.state_dict(), final_model_path)
+        torch.save(checkpoint_payload(), final_model_path)
         print(f"model saved to {final_model_path}")
     envs.close()
     return reward_hist, []

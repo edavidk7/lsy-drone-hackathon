@@ -6,6 +6,7 @@
 # | `level3.toml`       | *Yes*                          | *Yes*                       | *Yes*             | Online planning |
 [controller]
 file = "min_snap_rl_controller.py" # Put your controller file name here. Specifying a controller as argument to scripts will override this setting. Controllers are located in `lsy_drone_racing/control/`
+model_path = "ppo-nav-training-vivid-sponge-43/ppo_nav_drone_racing.ckpt"
 
 [deploy]
 ### Settings only relevant for deployment
@@ -43,9 +44,9 @@ lookat = [0.0, 0.0, 0.0]
 
 [env]
 id = "DroneRacing-v0"   # "DroneRacing-v0" for single races, "MultiDroneRacing-v0" for multi-drone races. Each environment also implements a vector-environment for faster training
-seed = -1               # -1 for random seeds or a non-zero integer for reproducibility
+seed = 42               # -1 for random seeds or a non-zero integer for reproducibility
 freq = 50               # Frequency of the environment's step function, in Hz
-sensor_range = 100.0      # Range at which the exact location of gates and obstacles become visible to the drone. Objects that are not in the drone's sensor range report their nominal position.
+sensor_range = 0.7     # Range at which the exact location of gates and obstacles become visible to the drone. Objects that are not in the drone's sensor range report their nominal position.
 control_mode = "attitude"  # Control mode of the environment. Can be either "state" or "attitude"
 
 [env.track]
