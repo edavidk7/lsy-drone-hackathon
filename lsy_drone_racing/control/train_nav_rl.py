@@ -44,7 +44,7 @@ class Args:
     config: str = "level0.toml"
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
 
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 20_000_000
     learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
     num_envs: int = 2048
     num_steps: int = 16
@@ -66,19 +66,19 @@ class Args:
     critic_hdim: int = 256
     gate_progress_coef: float = 5.0
     gate_pass_bonus: float = 10.0
-    success_bonus: float = 15.0
+    success_bonus: float = 10.0
     crash_penalty: float = 1.0
     init_logstd: float = -1
     init_logstd_last: float = 1.0
     act_coef: float = 0.01  # energy penalty on the collective-thrust action channel only
     d_act_main_coef: float = 0.1  # jerk penalty on the roll/pitch/yaw action channels
-    d_act_aux_coef: float = 0.2  # jerk penalty on the collective-thrust action channel
+    d_act_aux_coef: float = 0.1  # jerk penalty on the collective-thrust action channel
     max_angle: float = float(np.pi / 2)  # rad, max commanded roll/pitch
     max_yaw: float = float(np.pi / 2)  # rad, max commanded yaw 
     n_nearest_obstacles: int = 2
-    progress_obs: bool = True  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
-    lookahead_gates: int = 1  # number of upcoming gates (after the target) to include, in the drone body frame
-    gravity_obs: bool = True  # append the gravity direction in the drone body frame (attitude/tilt cue)
+    progress_obs: bool = False  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
+    lookahead_gates: int = 0  # number of upcoming gates (after the target) to include, in the drone body frame
+    gravity_obs: bool = False  # append the gravity direction in the drone body frame (attitude/tilt cue)
     checkpoint_every_iterations: int = 10
     episode_step_limit: int = 1500
 
