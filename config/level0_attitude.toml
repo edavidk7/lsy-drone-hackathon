@@ -1,12 +1,11 @@
-# Level Competition: randomized track layout (randomize=true) but PERFECT knowledge
-# (sensor_range huge => gates/obstacles report true poses from t=0). Plan-once is valid here.
+# Level 0 (attitude control) -- min-snap planner + line-tracking PPO policy
 
-# | Evaluation Scenario | Randomized Inertial Properties | Randomized Obstacles, Gates | Randomized Tracks | Notes           |
-# | :-----------------: | :----------------------------: | :-------------------------: | :---------------: | :-------------: |
-# | `level3.toml`       | *Yes*                          | *Yes*                       | *Yes*             | Online planning |
+# | Evaluation Scenario | Randomized Inertial Properties | Randomized Obstacles, Gates | Randomized Tracks | Notes             |
+# | :-----------------: | :----------------------------: | :-------------------------: | :---------------: | :---------------: |
+# | `level0.toml`       | *No*                           | *No*                        | *No*              | Perfect knowledge |
 [controller]
 file = "min_snap_rl_controller.py" # Put your controller file name here. Specifying a controller as argument to scripts will override this setting. Controllers are located in `lsy_drone_racing/control/`
-model_path = "ppo_min_snap.ckpt"
+model_path = "ppo_drone_racing_vaclav.ckpt"   # or "ppo_drone_racing.ckpt", or "ppo_min_snap.ckpt"
 
 [deploy]
 ### Settings only relevant for deployment
@@ -41,48 +40,47 @@ azimuth = 180.0
 elevation = -25.0
 lookat = [0.0, 0.0, 0.0]
 
-
 [env]
 id = "DroneRacing-v0"   # "DroneRacing-v0" for single races, "MultiDroneRacing-v0" for multi-drone races. Each environment also implements a vector-environment for faster training
-seed = 42             # -1 for random seeds or a non-zero integer for reproducibility
+seed = 42              # -1 for random seeds or a non-zero integer for reproducibility
 freq = 50               # Frequency of the environment's step function, in Hz
-sensor_range = 0.7     # Range at which the exact location of gates and obstacles become visible to the drone. Objects that are not in the drone's sensor range report their nominal position.
+sensor_range = 0.7      # Range at which the exact location of gates and obstacles become visible to the drone. Objects that are not in the drone's sensor range report their nominal position.
 control_mode = "attitude"  # Control mode of the environment. Can be either "state" or "attitude"
 
 [env.track]
-# Full track radomization. When activated, the position (x & y) and orientation (yaw) 
-# of the below given gates, obstacles and drones is randomized inside the safety limits. 
+# Full track radomization. When activated, the position (x & y) and orientation (yaw)
+# of the below given gates, obstacles and drones is randomized inside the safety limits.
 # Note: The order and therefore also height is not randomized!
-randomize = true
+randomize = false
 
 # Tall gates: 1.195m height. Short gates: 0.695m height. Height is measured from the ground to the center of the gate.
 # Gates are square. Gates are 0.72m wide (outer dimensions of the frame) with a 0.4m wide opening.
 [[env.track.gates]]
-pos = [0.0, 0.0, 0.7]
-rpy = [0.0, 0.0, 0.0]
+pos = [0.5 , 0.25, 0.7]
+rpy = [0.0, 0.0, -0.78]
 [[env.track.gates]]
-pos = [0.0, 0.0, 1.2]
-rpy = [0.0, 0.0, 0.0]
+pos = [1.05, 0.75, 1.2]
+rpy = [0.0, 0.0, 2.35]
 [[env.track.gates]]
-pos = [0.0, 0.0, 0.7]
-rpy = [0.0, 0.0, 0.0]
+pos = [-1.0, -0.25, 0.7]
+rpy = [0.0, 0.0, 3.14]
 [[env.track.gates]]
-pos = [0.0, 0.0, 1.2]
+pos = [0.0, -0.75, 1.2]
 rpy = [0.0, 0.0, 0.0]
 
 # Obstacle height: 1.52m + reflective marker on top. Height is measured from the ground to the top of the obstacle.
 # Obstacles are cylinders with a diameter of 0.03m.
 [[env.track.obstacles]]
-pos = [0.0, 0.0, 1.55]
+pos = [0.0, 0.75, 1.55]
 [[env.track.obstacles]]
-pos = [0.0, 0.0, 1.55]
+pos = [1.0, 0.25, 1.55]
 [[env.track.obstacles]]
-pos = [0.0, 0.0, 1.55]
+pos = [-1.5, -0.25, 1.55]
 [[env.track.obstacles]]
-pos = [0.0, 0.0, 1.55]
+pos = [-0.5, -0.75, 1.55]
 
 [[env.track.drones]]
-pos = [0.0, 0.0, 0.0]
+pos = [-1.5, 0.75, 0.01]
 rpy = [0.0, 0.0, 0.0]
 vel = [0, 0, 0]
 ang_vel = [0, 0, 0]
@@ -101,45 +99,3 @@ fn = "uniform"
 [env.disturbances.dynamics.kwargs]
 minval = [-0.1, -0.1, -0.1]
 maxval = [0.1, 0.1, 0.1]
-
-[env.randomizations.drone_pos]
-fn = "uniform"
-[env.randomizations.drone_pos.kwargs]
-minval = [-0.1, -0.1, 0.0]
-maxval = [0.1, 0.1, 0.02]
-
-[env.randomizations.drone_rpy]
-fn = "uniform"
-[env.randomizations.drone_rpy.kwargs]
-minval = [-0.1, -0.1, -0.1]
-maxval = [0.1, 0.1, 0.1]
-
-[env.randomizations.drone_mass]
-fn = "uniform"
-[env.randomizations.drone_mass.kwargs]
-minval = -0.005
-maxval = 0.005
-
-[env.randomizations.drone_inertia]
-fn = "uniform"
-[env.randomizations.drone_inertia.kwargs]
-minval = [-0.000001, -0.000001, -0.000001]
-maxval = [0.000001, 0.000001, 0.000001]
-
-[env.randomizations.gate_pos]
-fn = "uniform"
-[env.randomizations.gate_pos.kwargs]
-minval = [-0.15, -0.15, -0.1]
-maxval = [0.15, 0.15, 0.1]
-
-[env.randomizations.gate_rpy]
-fn = "uniform"
-[env.randomizations.gate_rpy.kwargs]
-minval = [-0.05, -0.1, -0.2]
-maxval = [0.05, 0.1, 0.2]
-
-[env.randomizations.obstacle_pos]
-fn = "uniform"
-[env.randomizations.obstacle_pos.kwargs]
-minval = [-0.15, -0.15, -0.05]
-maxval = [0.15, 0.15, 0.05]

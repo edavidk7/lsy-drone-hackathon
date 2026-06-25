@@ -50,11 +50,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 HISTORY_SECONDS = 5.0
 PREDICT_HORIZON_STEPS = 50  # steps @ control frequency (e.g. 50 @ 50 Hz = 1.0 s)
 DEFAULT_VIDEO_CAMERA = "fpv_cam:0"
-DEFAULT_VIDEO_WIDTH = 640
-DEFAULT_VIDEO_HEIGHT = 360
-DEFAULT_VIDEO_RATE_HZ = 15.0
-DEFAULT_VIDEO_QUALITY = 75
-DEFAULT_VIDEO_RECYCLE_S = 12.0
+DEFAULT_VIDEO_WIDTH = 480
+DEFAULT_VIDEO_HEIGHT = 270
+DEFAULT_VIDEO_RATE_HZ = 20.0
+DEFAULT_VIDEO_QUALITY = 65
+DEFAULT_VIDEO_RECYCLE_S = 20.0
 
 
 async def _self_test_websocket(url: str) -> None:
@@ -161,7 +161,7 @@ class _CommandPublisher:
 
 
 class Receiver(threading.Thread):
-    """Background thread: ZMQ SUB -> ShadowSim rollout -> shared frame + rolling history."""
+    """Background thread: ZMQ SUB -> shared frame + rolling history."""
 
     def __init__(
         self,
@@ -181,6 +181,7 @@ class Receiver(threading.Thread):
         self._min_period = 1.0 / max_rate_hz
         self._stop = threading.Event()
         self.freq = int(config.env.freq)
+        self.control_mode = str(config.env.control_mode)
         maxlen = int(HISTORY_SECONDS * self.freq)
         self._hist_t: deque[float] = deque(maxlen=maxlen)
         self._hist_pos: deque[list] = deque(maxlen=maxlen)
@@ -248,30 +249,24 @@ class Receiver(threading.Thread):
         self._last_t_step = t_step
         t_sec = t_step / self.freq
 
-        pred = shadow.predict(
-            obs,
-            prev_action,
-            current_action=action,
-            tick=t_step,
-            n_steps=PREDICT_HORIZON_STEPS,
-        )
-        pred_xyz = np.asarray(pred.get("xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
-        if pred_xyz.ndim != 2 or pred_xyz.shape[1] != 3:
-            pred_xyz = np.asarray(obs["pos"], dtype=np.float32).reshape(1, 3)
-        target_len = int(PREDICT_HORIZON_STEPS) + 1
-        if pred_xyz.shape[0] < target_len:
-            tail = np.repeat(pred_xyz[-1:].copy(), target_len - pred_xyz.shape[0], axis=0)
-            pred_xyz = np.vstack([pred_xyz, tail])
-
         self._hist_t.append(t_sec)
         self._hist_pos.append(np.asarray(obs["pos"], dtype=float).tolist())
         self._hist_vel.append(np.asarray(obs["vel"], dtype=float).tolist())
         self._hist_action.append(action.astype(float).tolist())
         self._hist_gate.append(int(np.asarray(obs["target_gate"])))
 
+        # One-step forward sim to expose rotor telemetry (RPM / torque estimates) only.
+        pred = shadow.predict(
+            obs,
+            prev_action,
+            current_action=action,
+            tick=t_step,
+            n_steps=1,
+        )
+
         vel = np.asarray(obs["vel"], dtype=float)
         frame = {
-            "control_mode": shadow.control_mode,
+            "control_mode": self.control_mode,
             "freq": self.freq,
             "t": t_sec,
             "history": {
@@ -282,10 +277,8 @@ class Receiver(threading.Thread):
                 "target_gate": list(self._hist_gate),
             },
             "prediction": {
-                "xyz": pred_xyz.astype(float).tolist(),
-                "actions": pred["actions"].astype(float).tolist(),
-                "horizon_steps": int(PREDICT_HORIZON_STEPS),
-                "horizon_s": float(PREDICT_HORIZON_STEPS / self.freq),
+                "horizon_steps": 1,
+                "horizon_s": float(1.0 / self.freq),
                 "motor": pred.get("motor", {}),
             },
             "current": {
@@ -411,20 +404,17 @@ def build_app(
         last_shadow_reset_t = time.monotonic()
         camera_idx = 0
         dark_frames = 0
-        same_payload_count = 0
-        prev_payload: bytes | None = None
         last_good_payload: bytes | None = None
         try:
             while True:
-                if time.monotonic() - last_shadow_reset_t >= max(float(video_recycle_s), 1.0):
+                loop_start_t = time.monotonic()
+                if loop_start_t - last_shadow_reset_t >= max(float(video_recycle_s), 1.0):
                     logger.info("Periodic video renderer recycle (%.1fs)", float(video_recycle_s))
                     video_shadow.close()
                     video_shadow, candidates = _spawn_shadow()
                     last_shadow_reset_t = time.monotonic()
                     camera_idx = 0
                     dark_frames = 0
-                    same_payload_count = 0
-                    prev_payload = None
                 obs_seq, _, obs_packet = shared_obs.get()
                 if obs_seq != last_obs_seq and obs_packet is not None:
                     last_obs_seq = obs_seq
@@ -451,30 +441,33 @@ def build_app(
 
                         image = Image.fromarray(frame_rgb)
                         buff = io.BytesIO()
-                        image.save(buff, format="JPEG", quality=jpeg_quality, optimize=True)
+                        image.save(
+                            buff,
+                            format="JPEG",
+                            quality=jpeg_quality,
+                            optimize=False,
+                            progressive=False,
+                            subsampling=2,
+                        )
                         payload = buff.getvalue()
 
                         if not is_dark:
                             last_good_payload = payload
-                            same_payload_count = same_payload_count + 1 if payload == prev_payload else 0
-                            prev_payload = payload
                             shared_video.set(payload)
                             await websocket.send_bytes(payload)
                         elif last_good_payload is not None:
                             shared_video.set(last_good_payload)
                             await websocket.send_bytes(last_good_payload)
 
-                        if dark_frames >= 12 or same_payload_count >= 40:
-                            reason = "dark" if dark_frames >= 12 else "stuck"
-                            logger.warning("Resetting video renderer (%s frames) for %s camera=%s", dark_frames if reason == "dark" else same_payload_count, reason, active_camera)
+                        if dark_frames >= 12:
+                            logger.warning("Resetting video renderer (%s dark frames) camera=%s", dark_frames, active_camera)
                             video_shadow.close()
                             video_shadow, candidates = _spawn_shadow()
                             last_shadow_reset_t = time.monotonic()
                             camera_idx = 0
                             dark_frames = 0
-                            same_payload_count = 0
-                            prev_payload = None
-                await asyncio.sleep(frame_interval)
+                elapsed = time.monotonic() - loop_start_t
+                await asyncio.sleep(max(0.0, frame_interval - elapsed))
         except WebSocketDisconnect:
             logger.info(
                 "Video websocket disconnected from %s",
