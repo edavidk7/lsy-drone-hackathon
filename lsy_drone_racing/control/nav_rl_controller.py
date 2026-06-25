@@ -12,7 +12,7 @@ import os
 from drone_models.core import load_params
 
 from lsy_drone_racing.control import Controller
-from lsy_drone_racing.control.train_nav_rl import (
+from lsy_drone_racing.control.nav_rl_common import (
     Agent,
     Args,
     attitude_setpoint_from_action,

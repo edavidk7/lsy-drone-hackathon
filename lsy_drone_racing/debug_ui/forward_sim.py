@@ -157,6 +157,27 @@ class ShadowSim:
             logger.warning("Ego-camera render failed", exc_info=True)
             return None
 
+    def _motor_telemetry(self) -> dict:
+        """Extract per-motor RPM and estimated torque from current sim state."""
+        sim_data = self._env.unwrapped.data.sim_data
+        rpm = np.abs(np.asarray(sim_data.states.rotor_vel, dtype=np.float32)[0, 0])
+        peak = float(np.max(rpm)) if rpm.size else 0.0
+        intensity = rpm / (peak + 1e-6) if peak > 0 else np.zeros_like(rpm)
+
+        torque_est = np.zeros_like(rpm)
+        coeff = getattr(sim_data.params, "rpm2torque", None)
+        if coeff is not None:
+            try:
+                torque_est = np.asarray(np.polyval(np.asarray(coeff, dtype=np.float32), rpm), dtype=np.float32)
+            except Exception:  # noqa: BLE001
+                torque_est = np.zeros_like(rpm)
+
+        return {
+            "rpm": rpm.astype(float).tolist(),
+            "torque_est": torque_est.astype(float).tolist(),
+            "intensity": intensity.astype(float).tolist(),
+        }
+
     def predict(
         self,
         obs: dict,
@@ -196,6 +217,7 @@ class ShadowSim:
         obs_k = obs
         horizon = max(int(n_steps), 0)
         steps_done = 0
+        motor = self._motor_telemetry()
         try:
             if current_action is not None and np.asarray(current_action).size > 0 and horizon > 0:
                 action0 = np.asarray(current_action, dtype=np.float32)
@@ -203,11 +225,12 @@ class ShadowSim:
                 obs_k, reward, terminated, truncated, info = self._env.step(action0)
                 ctrl.step_callback(action0, obs_k, reward, terminated, truncated, info)
                 xyz.append(np.asarray(obs_k["pos"], dtype=np.float32))
+                motor = self._motor_telemetry()
                 steps_done = 1
                 if terminated or truncated:
                     horizon = steps_done
 
-            for _ in range(steps_done, horizon):
+            for k in range(steps_done, horizon):
                 action = np.asarray(ctrl.compute_control(obs_k), dtype=np.float32)
                 actions.append(action)
                 obs_k, reward, terminated, truncated, info = self._env.step(action)
@@ -215,6 +238,8 @@ class ShadowSim:
                 # MPC's trajectory index keeps pace with the rolled-out state.
                 ctrl.step_callback(action, obs_k, reward, terminated, truncated, info)
                 xyz.append(np.asarray(obs_k["pos"], dtype=np.float32))
+                if k == 0 and steps_done == 0:
+                    motor = self._motor_telemetry()
                 if terminated or truncated:
                     break
         except Exception:  # noqa: BLE001 - a failed rollout must not kill the server loop.
@@ -230,6 +255,7 @@ class ShadowSim:
         return {
             "xyz": np.asarray(xyz, dtype=np.float32),
             "actions": np.asarray(actions, dtype=np.float32) if actions else np.zeros((0,)),
+            "motor": motor,
         }
 
     def close(self) -> None:

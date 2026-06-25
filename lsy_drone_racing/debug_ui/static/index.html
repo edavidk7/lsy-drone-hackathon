@@ -51,8 +51,21 @@
     text-transform: uppercase;
     letter-spacing: .08em;
   }
-  .layout { display: grid; grid-template-columns: 1fr 380px; gap: 12px; padding: 12px; }
-  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .layout {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr 0.9fr;
+    gap: 12px;
+    padding: 12px;
+    align-items: start;
+  }
+  .panel-traj { grid-column: 1; grid-row: 1; }
+  .panel-recon { grid-column: 2; grid-row: 1; }
+  .panel-motor { grid-column: 3; grid-row: 1; }
+  .panel-pos { grid-column: 1; grid-row: 2; }
+  .panel-act { grid-column: 1; grid-row: 3; }
+  .panel-status { grid-column: 2 / span 2; grid-row: 2; }
+  .panel-current { grid-column: 2; grid-row: 3; }
+  .panel-link { grid-column: 3; grid-row: 3; }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -67,6 +80,61 @@
   }
   #traj { height: 460px; }
   .ts { height: 200px; }
+  .motor-wrap {
+    position: relative;
+    border: 1px solid #fff;
+    background: #000;
+    height: 460px;
+    padding: 14px;
+  }
+  .motor-drone {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+  .motor-center {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 84px;
+    height: 84px;
+    transform: translate(-50%, -50%) rotate(45deg);
+    border: 1px solid #fff;
+    background: #000;
+  }
+  .motor-arm {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2px;
+    height: 180px;
+    background: #fff;
+    transform-origin: center center;
+    opacity: .7;
+  }
+  .motor-arm.a { transform: translate(-50%, -50%) rotate(45deg); }
+  .motor-arm.b { transform: translate(-50%, -50%) rotate(-45deg); }
+  .motor-node {
+    position: absolute;
+    width: 116px;
+    border: 1px solid #fff;
+    padding: 4px 6px;
+    font-size: 10px;
+    line-height: 1.25;
+    text-transform: uppercase;
+    background: #000;
+  }
+  .motor-node.n0 { left: 0; top: 0; }
+  .motor-node.n1 { right: 0; top: 0; }
+  .motor-node.n2 { left: 0; bottom: 0; }
+  .motor-node.n3 { right: 0; bottom: 0; }
+  .motor-title { font-weight: 700; letter-spacing: .06em; }
+  .motor-bar {
+    margin-top: 3px;
+    height: 6px;
+    border: 1px solid #fff;
+    background: #0018ff;
+  }
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .stat {
     background: var(--bg);
@@ -109,7 +177,7 @@
     position: relative;
     border: 1px solid #fff;
     background: #000;
-    height: 230px;
+    height: 460px;
     overflow: hidden;
   }
   #recon-feed {
@@ -162,47 +230,61 @@
 </header>
 
 <div class="layout">
-  <div class="col">
-    <div class="panel"><h2>Trajectory — history &amp; <span id="pred-horizon-label">prediction</span></h2><div id="traj"></div></div>
-    <div class="panel"><h2>Position (m)</h2><div id="pos-ts" class="ts"></div></div>
-    <div class="panel"><h2>Action</h2><div id="act-ts" class="ts"></div></div>
-  </div>
+  <div class="panel panel-traj"><h2>Trajectory — history &amp; <span id="pred-horizon-label">prediction</span></h2><div id="traj"></div></div>
 
-  <div class="col">
-    <div class="panel">
-      <h2>Recon Feed</h2>
-      <div class="recon-wrap">
-        <img id="recon-feed" alt="Drone ego camera" />
-        <div class="recon-no-signal" id="recon-no-signal">No Signal</div>
-        <div class="recon-overlay">
-          <div class="recon-row">
-            <span class="recon-pill">Link <span id="recon-link">offline</span></span>
-            <span class="recon-pill">Mode <span id="recon-mode">–</span></span>
-          </div>
-          <div class="recon-row">
-            <span class="recon-pill">Gate <span id="recon-gate">–</span></span>
-            <span class="recon-pill">Speed <span id="recon-speed">–</span></span>
-            <span class="recon-pill">T <span id="recon-time">0.00 s</span></span>
-          </div>
+  <div class="panel panel-recon">
+    <h2>Recon Feed</h2>
+    <div class="recon-wrap">
+      <img id="recon-feed" alt="Drone ego camera" />
+      <div class="recon-no-signal" id="recon-no-signal">No Signal</div>
+      <div class="recon-overlay">
+        <div class="recon-row">
+          <span class="recon-pill">Link <span id="recon-link">offline</span></span>
+          <span class="recon-pill">Mode <span id="recon-mode">–</span></span>
+        </div>
+        <div class="recon-row">
+          <span class="recon-pill">Gate <span id="recon-gate">–</span></span>
+          <span class="recon-pill">Speed <span id="recon-speed">–</span></span>
+          <span class="recon-pill">T <span id="recon-time">0.00 s</span></span>
         </div>
       </div>
     </div>
-    <div class="panel">
-      <h2>Status</h2>
-      <div class="stat-grid">
-        <div class="stat"><div class="k">Target gate</div><div class="v" id="s-gate">–</div></div>
-        <div class="stat"><div class="k">Speed</div><div class="v" id="s-speed">–</div></div>
-        <div class="stat" style="grid-column:1/3"><div class="k">State</div><div class="v small"><span class="badge flying" id="s-state">–</span></div></div>
-        <div class="stat" style="grid-column:1/3"><div class="k">Position</div><div class="v small vec" id="s-pos">–</div></div>
-        <div class="stat" style="grid-column:1/3"><div class="k">Velocity</div><div class="v small vec" id="s-vel">–</div></div>
+  </div>
+
+  <div class="panel panel-motor">
+    <h2>Motor Telemetry (Pred)</h2>
+    <div class="motor-wrap">
+      <div class="motor-drone">
+        <div class="motor-arm a"></div>
+        <div class="motor-arm b"></div>
+        <div class="motor-center"></div>
+        <div class="motor-node n0"><div class="motor-title">M1</div><div id="m0-rpm">RPM --</div><div id="m0-tq">TQ --</div><div class="motor-bar" id="m0-bar"></div></div>
+        <div class="motor-node n1"><div class="motor-title">M2</div><div id="m1-rpm">RPM --</div><div id="m1-tq">TQ --</div><div class="motor-bar" id="m1-bar"></div></div>
+        <div class="motor-node n2"><div class="motor-title">M3</div><div id="m2-rpm">RPM --</div><div id="m2-tq">TQ --</div><div class="motor-bar" id="m2-bar"></div></div>
+        <div class="motor-node n3"><div class="motor-title">M4</div><div id="m3-rpm">RPM --</div><div id="m3-tq">TQ --</div><div class="motor-bar" id="m3-bar"></div></div>
       </div>
     </div>
-    <div class="panel"><h2>Current action (<span id="s-mode">–</span>)</h2><table class="act"><tbody id="s-action"></tbody></table></div>
-    <div class="panel"><h2>Link</h2>
-      <div class="stat-grid">
-        <div class="stat"><div class="k">Updates/s</div><div class="v" id="s-rate">0</div></div>
-        <div class="stat"><div class="k">Sim time</div><div class="v small" id="s-time">0.00 s</div></div>
-      </div>
+  </div>
+
+  <div class="panel panel-pos"><h2>Position (m)</h2><div id="pos-ts" class="ts"></div></div>
+  <div class="panel panel-act"><h2>Action</h2><div id="act-ts" class="ts"></div></div>
+
+  <div class="panel panel-status">
+    <h2>Status</h2>
+    <div class="stat-grid">
+      <div class="stat"><div class="k">Target gate</div><div class="v" id="s-gate">–</div></div>
+      <div class="stat"><div class="k">Speed</div><div class="v" id="s-speed">–</div></div>
+      <div class="stat" style="grid-column:1/3"><div class="k">State</div><div class="v small"><span class="badge flying" id="s-state">–</span></div></div>
+      <div class="stat" style="grid-column:1/3"><div class="k">Position</div><div class="v small vec" id="s-pos">–</div></div>
+      <div class="stat" style="grid-column:1/3"><div class="k">Velocity</div><div class="v small vec" id="s-vel">–</div></div>
+    </div>
+  </div>
+
+  <div class="panel panel-current"><h2>Current action (<span id="s-mode">–</span>)</h2><table class="act"><tbody id="s-action"></tbody></table></div>
+  <div class="panel panel-link"><h2>Link</h2>
+    <div class="stat-grid">
+      <div class="stat"><div class="k">Updates/s</div><div class="v" id="s-rate">0</div></div>
+      <div class="stat"><div class="k">Sim time</div><div class="v small" id="s-time">0.00 s</div></div>
     </div>
   </div>
 </div>
@@ -284,6 +366,26 @@ const fmt3 = (a)=> "[" + a.map(v=>v.toFixed(2)).join(", ") + "]";
 const setReconLink = (status)=> { $("recon-link").textContent = status; };
 const holdTrajInteraction = ()=> { trajInteractUntil = performance.now() + 500; };
 ["mousedown", "wheel", "touchstart"].forEach((evt)=>$("traj").addEventListener(evt, holdTrajInteraction, { passive: true }));
+const lerp = (a,b,t)=>Math.round(a + (b-a)*t);
+const motorColor = (t)=> {
+  const v = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0));
+  const r = lerp(0,255,v), g = 24, b = lerp(255,0,v);
+  return `rgb(${r},${g},${b})`;
+};
+const updateMotorTelemetry = (motor)=> {
+  const rpm = Array.isArray(motor?.rpm) ? motor.rpm : [];
+  const tq = Array.isArray(motor?.torque_est) ? motor.torque_est : [];
+  const intensity = Array.isArray(motor?.intensity) ? motor.intensity : [];
+  for (let i=0;i<4;i++) {
+    const rv = Number(rpm[i]);
+    const tv = Number(tq[i]);
+    const iv = Number(intensity[i]);
+    $("m"+i+"-rpm").textContent = Number.isFinite(rv) ? `RPM ${rv.toFixed(0)}` : "RPM --";
+    $("m"+i+"-tq").textContent = Number.isFinite(tv) ? `TQ ${tv.toFixed(6)}` : "TQ --";
+    const bar = $("m"+i+"-bar");
+    bar.style.background = motorColor(iv);
+  }
+};
 
 function render(f) {
   frames++;
@@ -332,6 +434,7 @@ function render(f) {
     const ms = Math.round(f.prediction.horizon_s * 1000);
     $("pred-horizon-label").textContent = `${f.prediction.horizon_steps} steps (${ms} ms)`;
   }
+  updateMotorTelemetry(f.prediction?.motor);
   const done = f.current.target_gate < 0;
   const st = $("s-state"); st.textContent = done ? "FINISHED" : "FLYING";
   st.className = "badge " + (done ? "done" : "flying");

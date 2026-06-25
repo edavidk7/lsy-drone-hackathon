@@ -6,7 +6,7 @@
 [controller]
 file = "state_controller.py" # Put your controller file name here. Specifying a controller as argument to scripts will override this setting. Controllers are located in `lsy_drone_racing/control/`
 # model_path = "quiet-elevator-20/ppo_nav_drone_racing.ckpt"
-model_path = "ppo-nav-training-vivid-sponge-43/ppo_nav_drone_racing.ckpt"
+model_path = "ppo_nav_drone_racing.ckpt"
 
 [deploy]
 ### Settings only relevant for deployment
@@ -18,8 +18,8 @@ check_drone_start_pos = true
 real_track_objects = true
 
 [[deploy.drones]]
-id = 10
-channel = 100
+id = 11
+channel = 80
 drone_model = "cf21B_500"                        # Model of the drone, i.e., cf2x_L250, cf2x_P250, cf2x_T500, cf21B_500. For this course, we use cf21B_500
 
 

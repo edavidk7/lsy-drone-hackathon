@@ -239,6 +239,7 @@ class Receiver(threading.Thread):
                 "actions": pred["actions"].astype(float).tolist(),
                 "horizon_steps": int(PREDICT_HORIZON_STEPS),
                 "horizon_s": float(PREDICT_HORIZON_STEPS / self.freq),
+                "motor": pred.get("motor", {}),
             },
             "current": {
                 "pos": np.asarray(obs["pos"], dtype=float).tolist(),
