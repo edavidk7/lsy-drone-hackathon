@@ -224,16 +224,25 @@ class AttitudeMPC(Controller):
         self._tick_max = len(self._waypoints_pos) - 1 - self._N
         self._config = config
         self._finished = False
+        self._hover_thrust = float(self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1])
+        self._hover_pos_sp: NDArray[np.floating] | None = None
+        self._hover_yaw_sp: float | None = None
+        self._hover_i = np.zeros(3, dtype=np.float32)
+        # Simple position-hold PID (world frame): outputs desired acceleration [ax, ay, az].
+        self._hover_kp = np.asarray([1.6, 1.6, 2.4], dtype=np.float32)
+        self._hover_ki = np.asarray([0.05, 0.05, 0.35], dtype=np.float32)
+        self._hover_kd = np.asarray([0.9, 0.9, 1.2], dtype=np.float32)
 
         # Optional debug UI: publish each control step over ZMQ when DEBUG_UI_ENABLE is set.
         # Lazy + guarded so deployments without the env var (or without pyzmq) are unaffected.
         self._prev_action = np.zeros(self._nu, dtype=np.float32)
         self._dbg = None
+        self._stop_mode = False
         try:
-            from lsy_drone_racing.debug_ui.publisher import get_publisher
+            from lsy_drone_racing.debug_ui.publisher import get_bridge
 
-            self._dbg = get_publisher()
-            print(f"Attitude MPC publisher: {self._dbg=}")
+            self._dbg = get_bridge()
+            print(f"Attitude MPC bridge: {self._dbg=}")
         except Exception:  # noqa: BLE001 - the debug UI must never break the controller.
             self._dbg = None
 
@@ -255,6 +264,39 @@ class AttitudeMPC(Controller):
         if self._tick >= self._tick_max:
             self._finished = True
 
+        prev_stop_mode = self._stop_mode
+        if self._dbg is not None:
+            self._stop_mode = self._dbg.stop_requested()
+
+        if self._stop_mode:
+            curr_yaw = float(R.from_quat(obs["quat"]).as_euler("xyz")[-1])
+            if not prev_stop_mode or self._hover_pos_sp is None or self._hover_yaw_sp is None:
+                self._hover_pos_sp = np.asarray(obs["pos"], dtype=np.float32).copy()
+                self._hover_yaw_sp = curr_yaw
+                self._hover_i[:] = 0.0
+
+            pos = np.asarray(obs["pos"], dtype=np.float32)
+            vel = np.asarray(obs["vel"], dtype=np.float32)
+            err = self._hover_pos_sp - pos
+            derr = -vel
+            self._hover_i = np.clip(self._hover_i + err * self._dt, -2.0, 2.0)
+            acc_cmd = self._hover_kp * err + self._hover_ki * self._hover_i + self._hover_kd * derr
+
+            yaw = float(self._hover_yaw_sp)
+            g = max(float(-self.drone_params["gravity_vec"][-1]), 1e-6)
+            ax, ay, az = acc_cmd.astype(float)
+            pitch = np.clip((ax * np.cos(yaw) + ay * np.sin(yaw)) / g, -0.45, 0.45)
+            roll = np.clip((ax * np.sin(yaw) - ay * np.cos(yaw)) / g, -0.45, 0.45)
+            thrust = float(np.clip(self._hover_thrust + self.drone_params["mass"] * az, 0.2 * self._hover_thrust, 2.2 * self._hover_thrust))
+
+            u0 = np.asarray([roll, pitch, yaw, thrust], dtype=np.float32)
+            self._dbg.publish(self._tick, obs, u0, self._prev_action) if self._dbg is not None else None
+            self._prev_action = u0.copy()
+            return u0
+
+        if prev_stop_mode:
+            self._hover_i[:] = 0.0
+
         # Setting initial state
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
@@ -273,7 +315,7 @@ class AttitudeMPC(Controller):
         # Setting input reference (index > self._nx)
         # zero rpy
         # hover thrust
-        yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+        yref[:, 15] = self._hover_thrust
         for j in range(self._N):
             self._acados_ocp_solver.set(j, "yref", yref[j])
 
@@ -313,6 +355,9 @@ class AttitudeMPC(Controller):
         return self._finished
 
     def episode_callback(self):
-        """Reset the integral error."""
+        """Reset controller state between episodes."""
         self._tick = 0
         self._prev_action = np.zeros(self._nu, dtype=np.float32)
+        self._hover_pos_sp = None
+        self._hover_yaw_sp = None
+        self._hover_i[:] = 0.0

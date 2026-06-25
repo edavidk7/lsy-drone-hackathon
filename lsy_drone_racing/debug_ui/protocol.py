@@ -12,8 +12,10 @@ from typing import Any
 
 import numpy as np
 
-# Default ZMQ endpoint. Override via the DEBUG_UI_ADDR env var on both ends.
+# Default ZMQ endpoint for controller -> UI telemetry.
 DEFAULT_ADDR = "tcp://127.0.0.1:5599"
+# Default ZMQ endpoint for UI -> controller commands.
+DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5600"
 
 # Observation keys forwarded to the dashboard. Mirrors the env observation space.
 OBS_KEYS = (
@@ -58,4 +60,14 @@ def encode(t: int, obs: dict, action: Any, prev_action: Any) -> bytes:
 
 def decode(frame: bytes) -> dict:
     """Decode a JSON frame produced by :func:`encode`."""
+    return json.loads(frame.decode("utf-8"))
+
+
+def encode_cmd(command: dict[str, Any]) -> bytes:
+    """Encode a UI->controller command frame."""
+    return json.dumps(_to_jsonable(command)).encode("utf-8")
+
+
+def decode_cmd(frame: bytes) -> dict:
+    """Decode a UI->controller command frame."""
     return json.loads(frame.decode("utf-8"))

@@ -35,7 +35,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from lsy_drone_racing.debug_ui.protocol import DEFAULT_ADDR, decode
+from lsy_drone_racing.debug_ui.protocol import (
+    DEFAULT_ADDR,
+    DEFAULT_CMD_ADDR,
+    decode,
+    encode_cmd,
+)
 from lsy_drone_racing.debug_ui.forward_sim import ShadowSim
 from lsy_drone_racing.utils import load_config
 
@@ -47,8 +52,9 @@ PREDICT_HORIZON_STEPS = 50  # steps @ control frequency (e.g. 50 @ 50 Hz = 1.0 s
 DEFAULT_VIDEO_CAMERA = "fpv_cam:0"
 DEFAULT_VIDEO_WIDTH = 640
 DEFAULT_VIDEO_HEIGHT = 360
-DEFAULT_VIDEO_RATE_HZ = 30.0
+DEFAULT_VIDEO_RATE_HZ = 15.0
 DEFAULT_VIDEO_QUALITY = 75
+DEFAULT_VIDEO_RECYCLE_S = 12.0
 
 
 async def _self_test_websocket(url: str) -> None:
@@ -118,6 +124,40 @@ class _SharedObsFrame:
     def get(self) -> tuple[int, int, dict | None]:
         with self._lock:
             return self._seq, self._t_step, self._obs
+
+
+class _CommandPublisher:
+    """UI-side command publisher toward controller debug bridges."""
+
+    def __init__(self, cmd_addr: str):
+        import zmq
+
+        self._cmd_addr = cmd_addr
+        self._ctx = zmq.Context.instance()
+        self._sock = self._ctx.socket(zmq.PUB)
+        self._sock.setsockopt(zmq.SNDHWM, 1)
+        self._sock.setsockopt(zmq.LINGER, 0)
+        self._sock.bind(cmd_addr)
+        self._again = zmq.Again
+        logger.info("Debug UI command publisher bound on %s", cmd_addr)
+
+    def send(self, command: dict) -> bool:
+        try:
+            import zmq
+
+            self._sock.send(encode_cmd(command), flags=zmq.NOBLOCK)
+            return True
+        except self._again:
+            return False
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to send debug UI command", exc_info=True)
+            return False
+
+    def close(self) -> None:
+        try:
+            self._sock.close(0)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class Receiver(threading.Thread):
@@ -215,6 +255,13 @@ class Receiver(threading.Thread):
             tick=t_step,
             n_steps=PREDICT_HORIZON_STEPS,
         )
+        pred_xyz = np.asarray(pred.get("xyz", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+        if pred_xyz.ndim != 2 or pred_xyz.shape[1] != 3:
+            pred_xyz = np.asarray(obs["pos"], dtype=np.float32).reshape(1, 3)
+        target_len = int(PREDICT_HORIZON_STEPS) + 1
+        if pred_xyz.shape[0] < target_len:
+            tail = np.repeat(pred_xyz[-1:].copy(), target_len - pred_xyz.shape[0], axis=0)
+            pred_xyz = np.vstack([pred_xyz, tail])
 
         self._hist_t.append(t_sec)
         self._hist_pos.append(np.asarray(obs["pos"], dtype=float).tolist())
@@ -235,7 +282,7 @@ class Receiver(threading.Thread):
                 "target_gate": list(self._hist_gate),
             },
             "prediction": {
-                "xyz": pred["xyz"].astype(float).tolist(),
+                "xyz": pred_xyz.astype(float).tolist(),
                 "actions": pred["actions"].astype(float).tolist(),
                 "horizon_steps": int(PREDICT_HORIZON_STEPS),
                 "horizon_s": float(PREDICT_HORIZON_STEPS / self.freq),
@@ -266,11 +313,14 @@ def build_app(
     video_height: int = DEFAULT_VIDEO_HEIGHT,
     video_rate_hz: float = DEFAULT_VIDEO_RATE_HZ,
     video_quality: int = DEFAULT_VIDEO_QUALITY,
+    video_recycle_s: float = DEFAULT_VIDEO_RECYCLE_S,
+    cmd_addr: str = DEFAULT_CMD_ADDR,
 ):
     """Build the FastAPI app and start the background receiver."""
     shared = _SharedFrame()
     shared_video = _SharedBytesFrame()
     shared_obs = _SharedObsFrame()
+    cmd_pub = _CommandPublisher(cmd_addr)
     receiver = Receiver(
         config,
         addr,
@@ -297,7 +347,25 @@ def build_app(
     def healthz():
         seq, _ = shared.get()
         video_seq, _ = shared_video.get()
-        return JSONResponse({"ok": True, "latest_seq": seq, "latest_video_seq": video_seq, "addr": addr})
+        return JSONResponse(
+            {
+                "ok": True,
+                "latest_seq": seq,
+                "latest_video_seq": video_seq,
+                "addr": addr,
+                "cmd_addr": cmd_addr,
+            }
+        )
+
+    @app.post("/api/control/stop")
+    def api_control_stop():
+        sent = cmd_pub.send({"type": "stop", "enabled": True, "ts": time.time()})
+        return JSONResponse({"ok": sent, "command": "stop"})
+
+    @app.post("/api/control/resume")
+    def api_control_resume():
+        sent = cmd_pub.send({"type": "resume", "enabled": False, "ts": time.time()})
+        return JSONResponse({"ok": sent, "command": "resume"})
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
@@ -329,16 +397,34 @@ def build_app(
         frame_interval = 1.0 / max(video_rate_hz, 1e-3)
         jpeg_quality = int(np.clip(video_quality, 10, 95))
         last_obs_seq = -1
-        video_shadow = ShadowSim(config, controller_file)
-        available = set(video_shadow._available_cameras())  # noqa: SLF001
-        candidates = [video_camera, "fpv_cam:0", "track_cam:0"]
-        candidates = [c for i, c in enumerate(candidates) if c and c not in candidates[:i] and c in available]
-        if not candidates:
-            candidates = [video_camera]
+
+        def _spawn_shadow() -> tuple[ShadowSim, list[str]]:
+            shadow = ShadowSim(config, controller_file)
+            available = set(shadow._available_cameras())  # noqa: SLF001
+            cands = [video_camera, "fpv_cam:0", "track_cam:0"]
+            cands = [c for i, c in enumerate(cands) if c and c not in cands[:i] and c in available]
+            if not cands:
+                cands = [video_camera]
+            return shadow, cands
+
+        video_shadow, candidates = _spawn_shadow()
+        last_shadow_reset_t = time.monotonic()
         camera_idx = 0
         dark_frames = 0
+        same_payload_count = 0
+        prev_payload: bytes | None = None
+        last_good_payload: bytes | None = None
         try:
             while True:
+                if time.monotonic() - last_shadow_reset_t >= max(float(video_recycle_s), 1.0):
+                    logger.info("Periodic video renderer recycle (%.1fs)", float(video_recycle_s))
+                    video_shadow.close()
+                    video_shadow, candidates = _spawn_shadow()
+                    last_shadow_reset_t = time.monotonic()
+                    camera_idx = 0
+                    dark_frames = 0
+                    same_payload_count = 0
+                    prev_payload = None
                 obs_seq, _, obs_packet = shared_obs.get()
                 if obs_seq != last_obs_seq and obs_packet is not None:
                     last_obs_seq = obs_seq
@@ -350,10 +436,9 @@ def build_app(
                         height=video_height,
                     )
                     if frame_rgb is not None:
-                        if float(np.mean(frame_rgb)) < 3.0:
-                            dark_frames += 1
-                        else:
-                            dark_frames = 0
+                        is_dark = float(np.mean(frame_rgb)) < 3.0
+                        dark_frames = dark_frames + 1 if is_dark else 0
+
                         if dark_frames >= 5 and camera_idx + 1 < len(candidates):
                             camera_idx += 1
                             dark_frames = 0
@@ -363,12 +448,32 @@ def build_app(
                                 candidates[camera_idx],
                             )
                             continue
+
                         image = Image.fromarray(frame_rgb)
                         buff = io.BytesIO()
                         image.save(buff, format="JPEG", quality=jpeg_quality, optimize=True)
                         payload = buff.getvalue()
-                        shared_video.set(payload)
-                        await websocket.send_bytes(payload)
+
+                        if not is_dark:
+                            last_good_payload = payload
+                            same_payload_count = same_payload_count + 1 if payload == prev_payload else 0
+                            prev_payload = payload
+                            shared_video.set(payload)
+                            await websocket.send_bytes(payload)
+                        elif last_good_payload is not None:
+                            shared_video.set(last_good_payload)
+                            await websocket.send_bytes(last_good_payload)
+
+                        if dark_frames >= 12 or same_payload_count >= 40:
+                            reason = "dark" if dark_frames >= 12 else "stuck"
+                            logger.warning("Resetting video renderer (%s frames) for %s camera=%s", dark_frames if reason == "dark" else same_payload_count, reason, active_camera)
+                            video_shadow.close()
+                            video_shadow, candidates = _spawn_shadow()
+                            last_shadow_reset_t = time.monotonic()
+                            camera_idx = 0
+                            dark_frames = 0
+                            same_payload_count = 0
+                            prev_payload = None
                 await asyncio.sleep(frame_interval)
         except WebSocketDisconnect:
             logger.info(
@@ -383,6 +488,7 @@ def build_app(
     @app.on_event("shutdown")
     def _shutdown():
         receiver.stop()
+        cmd_pub.close()
 
     @app.on_event("startup")
     def _startup():
@@ -411,6 +517,8 @@ def main() -> None:
     parser.add_argument("--video-height", type=int, default=DEFAULT_VIDEO_HEIGHT)
     parser.add_argument("--video-rate", type=float, default=DEFAULT_VIDEO_RATE_HZ)
     parser.add_argument("--video-quality", type=int, default=DEFAULT_VIDEO_QUALITY)
+    parser.add_argument("--video-recycle-s", type=float, default=DEFAULT_VIDEO_RECYCLE_S)
+    parser.add_argument("--cmd-addr", default=None, help=f"Command ZMQ addr (default {DEFAULT_CMD_ADDR}).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -418,6 +526,7 @@ def main() -> None:
     import os
 
     addr = args.addr or os.environ.get("DEBUG_UI_ADDR", DEFAULT_ADDR)
+    cmd_addr = args.cmd_addr or os.environ.get("DEBUG_UI_CMD_ADDR", DEFAULT_CMD_ADDR)
 
     import uvicorn
     import importlib.util
@@ -437,6 +546,8 @@ def main() -> None:
         video_height=args.video_height,
         video_rate_hz=args.video_rate,
         video_quality=args.video_quality,
+        video_recycle_s=args.video_recycle_s,
+        cmd_addr=cmd_addr,
     )
     logger.info("Open http://%s:%d", args.host, args.port)
     async def _run_self_test():

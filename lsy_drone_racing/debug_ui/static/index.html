@@ -52,6 +52,39 @@
     letter-spacing: .08em;
   }
   .layout { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .control-strip {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .control-card {
+    border: 1px solid #fff;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .ctrl-btn {
+    min-width: 180px;
+    border: 2px solid #fff;
+    color: #fff;
+    padding: 14px 18px;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    cursor: pointer;
+  }
+  .ctrl-btn.stop { background: #b10000; }
+  .ctrl-btn.resume { background: #0d8f00; }
+  .ctrl-desc {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    opacity: .95;
+  }
   .top-row {
     display: grid;
     grid-template-columns: 1fr 1fr 0.4fr;
@@ -106,18 +139,21 @@
     border: 1px solid #fff;
     background: #000;
   }
-  .motor-arm {
+  .motor-spoke {
     position: absolute;
     left: 50%;
     top: 50%;
-    width: 2px;
-    height: 180px;
-    background: #fff;
-    transform-origin: center center;
-    opacity: .7;
+    width: 3px;
+    height: 120px;
+    transform-origin: 50% 100%;
+    border-radius: 2px;
+    background: #00c853;
+    opacity: .95;
   }
-  .motor-arm.a { transform: translate(-50%, -50%) rotate(45deg); }
-  .motor-arm.b { transform: translate(-50%, -50%) rotate(-45deg); }
+  .motor-spoke.s0 { transform: translate(-50%, -100%) rotate(45deg); }
+  .motor-spoke.s1 { transform: translate(-50%, -100%) rotate(135deg); }
+  .motor-spoke.s2 { transform: translate(-50%, -100%) rotate(225deg); }
+  .motor-spoke.s3 { transform: translate(-50%, -100%) rotate(315deg); }
   .motor-node {
     position: absolute;
     width: calc(50% - 6px);
@@ -138,6 +174,41 @@
     height: 6px;
     border: 1px solid #fff;
     background: #0018ff;
+  }
+  .rotor-spinner {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border: 1px solid #fff;
+    transform-origin: center;
+    animation: rotorSpin 0.8s linear infinite;
+    animation-play-state: paused;
+    opacity: .35;
+    z-index: 2;
+  }
+  .rotor-spinner.rg0 { left: calc(50% - 95px); top: calc(50% - 95px); }
+  .rotor-spinner.rg1 { right: calc(50% - 95px); top: calc(50% - 95px); }
+  .rotor-spinner.rg2 { left: calc(50% - 95px); bottom: calc(50% - 95px); }
+  .rotor-spinner.rg3 { right: calc(50% - 95px); bottom: calc(50% - 95px); }
+  .rotor-spinner.on {
+    animation-play-state: running;
+    opacity: 1;
+  }
+  .rotor-blade {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2px;
+    height: 16px;
+    background: #fff;
+    transform: translate(-50%, -50%);
+  }
+  .rotor-blade.b {
+    transform: translate(-50%, -50%) rotate(90deg);
+  }
+  @keyframes rotorSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .stat {
@@ -224,6 +295,46 @@
     padding: 2px 6px;
     background: rgba(0,0,0,.65);
   }
+  .splash {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    backdrop-filter: blur(7px);
+    background: rgba(0,0,0,.45);
+    z-index: 20;
+  }
+  .splash.hidden { display: none; }
+  .splash-title {
+    font-size: 40px;
+    font-weight: 800;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+  }
+  .splash-sub {
+    font-size: 14px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    opacity: .85;
+  }
+  .splash-dots { display: flex; gap: 8px; }
+  .splash-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #fff;
+    opacity: .25;
+    animation: pulse 1.2s infinite ease-in-out;
+  }
+  .splash-dot:nth-child(2) { animation-delay: .15s; }
+  .splash-dot:nth-child(3) { animation-delay: .3s; }
+  @keyframes pulse {
+    0%, 80%, 100% { transform: scale(0.8); opacity: .2; }
+    40% { transform: scale(1.2); opacity: 1; }
+  }
 </style>
 </head>
 <body>
@@ -233,9 +344,15 @@
   <span class="meta" id="meta">waiting for controller…</span>
 </header>
 
+<div class="splash" id="splash">
+  <div class="splash-title">Mission Control</div>
+  <div class="splash-sub" id="splash-sub">Awaiting telemetry link</div>
+  <div class="splash-dots"><span class="splash-dot"></span><span class="splash-dot"></span><span class="splash-dot"></span></div>
+</div>
+
 <div class="layout">
   <div class="top-row">
-    <div class="panel"><h2>Trajectory — history &amp; <span id="pred-horizon-label">prediction</span></h2><div id="traj"></div></div>
+    <div class="panel"><h2>Trajectory — history</h2><div id="traj"></div></div>
 
     <div class="panel">
       <h2>Recon Feed</h2>
@@ -257,18 +374,35 @@
     </div>
 
     <div class="panel">
-      <h2>Motor Telemetry (Pred)</h2>
+      <h2>Motor Telemetry</h2>
       <div class="motor-wrap">
         <div class="motor-drone">
-          <div class="motor-arm a"></div>
-          <div class="motor-arm b"></div>
+          <div class="motor-spoke s0" id="spoke-0"></div>
+          <div class="motor-spoke s1" id="spoke-1"></div>
+          <div class="motor-spoke s2" id="spoke-2"></div>
+          <div class="motor-spoke s3" id="spoke-3"></div>
           <div class="motor-center"></div>
           <div class="motor-node n0"><div class="motor-title">M1</div><div id="m0-rpm">RPM --</div><div id="m0-tq">TQ --</div><div class="motor-bar" id="m0-bar"></div></div>
           <div class="motor-node n1"><div class="motor-title">M2</div><div id="m1-rpm">RPM --</div><div id="m1-tq">TQ --</div><div class="motor-bar" id="m1-bar"></div></div>
           <div class="motor-node n2"><div class="motor-title">M3</div><div id="m2-rpm">RPM --</div><div id="m2-tq">TQ --</div><div class="motor-bar" id="m2-bar"></div></div>
           <div class="motor-node n3"><div class="motor-title">M4</div><div id="m3-rpm">RPM --</div><div id="m3-tq">TQ --</div><div class="motor-bar" id="m3-bar"></div></div>
+          <div class="rotor-spinner rg0" id="m0-spin"><div class="rotor-blade"></div><div class="rotor-blade b"></div></div>
+          <div class="rotor-spinner rg1" id="m1-spin"><div class="rotor-blade"></div><div class="rotor-blade b"></div></div>
+          <div class="rotor-spinner rg2" id="m2-spin"><div class="rotor-blade"></div><div class="rotor-blade b"></div></div>
+          <div class="rotor-spinner rg3" id="m3-spin"><div class="rotor-blade"></div><div class="rotor-blade b"></div></div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="control-strip">
+    <div class="control-card">
+      <button class="ctrl-btn stop" id="btn-stop">Stop</button>
+      <div class="ctrl-desc">stop and hover</div>
+    </div>
+    <div class="control-card">
+      <button class="ctrl-btn resume" id="btn-resume">Resume</button>
+      <div class="ctrl-desc">continue moving</div>
     </div>
   </div>
 
@@ -330,7 +464,6 @@ const ACT_LABELS = {
 // --- 3D trajectory ---------------------------------------------------------
 Plotly.newPlot("traj", [
   { type:"scatter3d", mode:"lines", name:"history", x:[],y:[],z:[], line:{color:TRACE.history, width:3} },
-  { type:"scatter3d", mode:"lines", name:"prediction (200ms)", x:[],y:[],z:[], line:{color:TRACE.prediction, width:6, dash:"dot"} },
   { type:"scatter3d", mode:"markers", name:"drone", x:[],y:[],z:[], marker:{color:TRACE.drone, size:5} },
   { type:"scatter3d", mode:"markers+text", name:"gates", x:[],y:[],z:[], marker:{color:TRACE.gates, size:6, symbol:"square"}, textposition:"top center", textfont:{color:TRACE.gates, size:10} },
   { type:"scatter3d", mode:"markers", name:"obstacles", x:[],y:[],z:[], marker:{color:TRACE.obstacles, size:5, symbol:"diamond-open"} },
@@ -340,13 +473,13 @@ Plotly.newPlot("traj", [
   camera:{ eye:{x:1.4,y:1.4,z:1.0} }, bgcolor: PLOT_BG,
   dragmode: "orbit",
   uirevision: "mission-control-3d",
-}}), {displayModeBar:true, responsive:true, scrollZoom:true});
+}}), {displayModeBar:true, responsive:false, scrollZoom:true});
 
 Plotly.newPlot("pos-ts", [
   {mode:"lines", name:"x", x:[],y:[], line:{color:TRACE.posX, width:2}},
   {mode:"lines", name:"y", x:[],y:[], line:{color:TRACE.posY, width:2, dash:"dot"}},
   {mode:"lines", name:"z", x:[],y:[], line:{color:TRACE.posZ, width:2, dash:"dash"}},
-], baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:true});
+], baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:false});
 
 let actInited = false;
 function initActPlot(n) {
@@ -363,7 +496,7 @@ function initActPlot(n) {
       dash: dashes[i % dashes.length],
     },
   }));
-  Plotly.newPlot("act-ts", traces, baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:true});
+  Plotly.newPlot("act-ts", traces, baseLayout({ xaxis:Object.assign({title:"t (s)"},axis), yaxis:axis }), {displayModeBar:false, responsive:false});
   actInited = true;
 }
 
@@ -373,6 +506,9 @@ let frames = 0, lastRateT = performance.now();
 let reconBlobUrl = null;
 let trajInteractUntil = 0;
 let pendingTrajFrame = null;
+let lastFrame = null;
+let telemetryLive = false;
+let videoLive = false;
 setInterval(()=>{ const now=performance.now(); $("s-rate").textContent=Math.round(frames*1000/(now-lastRateT)); frames=0; lastRateT=now; }, 1000);
 const fmt3 = (a)=> "[" + a.map(v=>v.toFixed(2)).join(", ") + "]";
 const setReconLink = (status)=> { $("recon-link").textContent = status; };
@@ -384,10 +520,19 @@ const motorColor = (t)=> {
   const r = lerp(0,255,v), g = 24, b = lerp(255,0,v);
   return `rgb(${r},${g},${b})`;
 };
+const shareColor = (share)=> {
+  const v = Math.max(0, Math.min(1, Number.isFinite(share) ? share : 0));
+  const r = lerp(0, 255, v);
+  const g = lerp(200, 16, v);
+  return `rgb(${r},${g},24)`;
+};
 const updateMotorTelemetry = (motor)=> {
   const rpm = Array.isArray(motor?.rpm) ? motor.rpm : [];
   const tq = Array.isArray(motor?.torque_est) ? motor.torque_est : [];
   const intensity = Array.isArray(motor?.intensity) ? motor.intensity : [];
+  const tqAbs = Array.from({length:4}, (_,i)=>Math.max(0, Math.abs(Number(tq[i]) || 0)));
+  const tqSum = tqAbs.reduce((a,b)=>a+b, 0);
+  const shares = tqAbs.map(v=>tqSum > 1e-9 ? v / tqSum : 0);
   for (let i=0;i<4;i++) {
     const rv = Number(rpm[i]);
     const tv = Number(tq[i]);
@@ -396,31 +541,61 @@ const updateMotorTelemetry = (motor)=> {
     $("m"+i+"-tq").textContent = Number.isFinite(tv) ? `TQ ${tv.toFixed(6)}` : "TQ --";
     const bar = $("m"+i+"-bar");
     bar.style.background = motorColor(iv);
+
+    const spoke = $("spoke-"+i);
+    spoke.style.background = shareColor(Math.min(1, shares[i] * 4));
+
+    const spin = $("m"+i+"-spin");
+    if (Number.isFinite(rv) && rv > 1) {
+      const dur = Math.max(0.06, Math.min(1.2, 7000 / rv));
+      spin.style.animationDuration = `${dur.toFixed(3)}s`;
+      spin.classList.add("on");
+    } else {
+      spin.classList.remove("on");
+    }
   }
 };
-
+const setSplash = (show, subtitle)=> {
+  const s = $("splash");
+  s.classList.toggle("hidden", !show);
+  if (subtitle) $("splash-sub").textContent = subtitle;
+};
+const refreshSplash = (subtitle)=> {
+  if (subtitle) $("splash-sub").textContent = subtitle;
+  setSplash(!(telemetryLive && videoLive));
+};
+const sendControlCmd = async (kind) => {
+  try {
+    await fetch(`/api/control/${kind}`, { method: "POST" });
+  } catch (_) {}
+};
+$("btn-stop").addEventListener("click", ()=>sendControlCmd("stop"));
+$("btn-resume").addEventListener("click", ()=>sendControlCmd("resume"));
 function render(f) {
+  lastFrame = f;
   frames++;
   $("status-dot").classList.add("live");
+  telemetryLive = true;
+  refreshSplash();
   $("meta").textContent = `connected · ${f.control_mode} · ${f.freq} Hz`;
 
   const col = (arr, i)=>arr.map(p=>p[i]);
-  const hp = f.history.pos, pr = f.prediction.xyz;
   const now = performance.now();
   if (now < trajInteractUntil) {
     pendingTrajFrame = f;
   } else {
     const src = pendingTrajFrame || f;
     pendingTrajFrame = null;
-    const hp2 = src.history.pos, pr2 = src.prediction.xyz;
-    Plotly.restyle("traj", { x:[col(hp2,0), col(pr2,0), [src.current.pos[0]]], y:[col(hp2,1), col(pr2,1), [src.current.pos[1]]], z:[col(hp2,2), col(pr2,2), [src.current.pos[2]]] }, [0,1,2]);
+    const hp2 = Array.isArray(src.history?.pos) ? src.history.pos : [];
+    Plotly.restyle("traj", { x:[col(hp2,0), [src.current.pos[0]]], y:[col(hp2,1), [src.current.pos[1]]], z:[col(hp2,2), [src.current.pos[2]]] }, [0,1]);
     const gp = src.gates.pos, op = src.obstacles.pos;
     Plotly.restyle("traj", {
       x:[col(gp,0), col(op,0)], y:[col(gp,1), col(op,1)], z:[col(gp,2), col(op,2)],
       text:[gp.map((_,i)=>"G"+i), op.map(()=>"")]
-    }, [3,4]);
+    }, [2,3]);
   }
 
+  const hp = f.history.pos;
   const ht = f.history.t;
   Plotly.restyle("pos-ts", { x:[ht,ht,ht], y:[col(hp,0),col(hp,1),col(hp,2)] }, [0,1,2]);
 
@@ -442,10 +617,6 @@ function render(f) {
   $("recon-gate").textContent = f.current.target_gate < 0 ? "DONE" : String(f.current.target_gate);
   $("recon-speed").textContent = f.current.speed.toFixed(2) + " m/s";
   $("recon-time").textContent = f.t.toFixed(2) + " s";
-  if (f.prediction && Number.isFinite(f.prediction.horizon_s)) {
-    const ms = Math.round(f.prediction.horizon_s * 1000);
-    $("pred-horizon-label").textContent = `${f.prediction.horizon_steps} steps (${ms} ms)`;
-  }
   updateMotorTelemetry(f.prediction?.motor);
   const done = f.current.target_gate < 0;
   const st = $("s-state"); st.textContent = done ? "FINISHED" : "FLYING";
@@ -458,17 +629,23 @@ function render(f) {
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  telemetryLive = false;
+  refreshSplash("Awaiting telemetry link");
   $("meta").textContent = `connecting to ${proto}://${location.host}/ws…`;
-  ws.onopen = ()=>{ $("meta").textContent = "connected"; };
+  ws.onopen = ()=>{ $("meta").textContent = "connected"; telemetryLive = true; refreshSplash("Awaiting feeds"); };
   ws.onmessage = (e)=>{ const f = JSON.parse(e.data); if (f && f.history) render(f); };
   ws.onclose = (e)=>{
+    telemetryLive = false;
     $("status-dot").classList.remove("live");
     const reason = e.reason ? ` (${e.reason})` : "";
     $("meta").textContent = `disconnected — retrying… [code ${e.code}${reason}]`;
+    refreshSplash("Link down · reconnecting");
     setTimeout(connect, 1000);
   };
   ws.onerror = ()=> {
+    telemetryLive = false;
     $("meta").textContent = `websocket error on ${proto}://${location.host}/ws`;
+    refreshSplash("Websocket error");
     ws.close();
   };
 }
@@ -477,26 +654,47 @@ function connectVideo() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/video`);
   ws.binaryType = "arraybuffer";
+  videoLive = false;
   setReconLink("connecting");
-  ws.onopen = ()=> setReconLink("live");
+  refreshSplash("Awaiting video feed");
+  ws.onopen = ()=> { videoLive = true; setReconLink("live"); refreshSplash(); };
   ws.onmessage = (e)=> {
     if (!(e.data instanceof ArrayBuffer)) return;
+    videoLive = true;
     const blob = new Blob([e.data], { type: "image/jpeg" });
     const url = URL.createObjectURL(blob);
     if (reconBlobUrl) URL.revokeObjectURL(reconBlobUrl);
     reconBlobUrl = url;
     $("recon-feed").src = url;
     $("recon-no-signal").style.display = "none";
+    refreshSplash();
   };
   ws.onclose = ()=> {
+    videoLive = false;
     setReconLink("retry");
+    if (reconBlobUrl) {
+      URL.revokeObjectURL(reconBlobUrl);
+      reconBlobUrl = null;
+    }
+    $("recon-feed").src = "";
+    $("recon-no-signal").style.display = "flex";
+    refreshSplash("Video link down · reconnecting");
     setTimeout(connectVideo, 1000);
   };
   ws.onerror = ()=> {
+    videoLive = false;
     setReconLink("error");
+    refreshSplash("Video websocket error");
     ws.close();
   };
 }
+
+window.addEventListener("resize", ()=> {
+  Plotly.Plots.resize($("traj"));
+  Plotly.Plots.resize($("pos-ts"));
+  Plotly.Plots.resize($("act-ts"));
+  if (lastFrame) render(lastFrame);
+});
 
 connect();
 connectVideo();

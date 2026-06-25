@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 import os
+import torch
+from scipy.spatial.transform import Rotation as R
 
 from drone_models.core import load_params
 
@@ -33,8 +34,19 @@ class NavRLController(Controller):
         assert self._control_mode in {"attitude", "state"}, (
             f"Unsupported control_mode: {self._control_mode}"
         )
+        self._config = config
         self._device = torch.device("cpu")
         self._finished = False
+        self._hover_mass = 1.0
+        self._hover_g = 9.81
+        self._hover_thrust = 0.5
+        self._hover_pos_sp: NDArray[np.floating] | None = None
+        self._hover_yaw_sp: float | None = None
+        self._hover_i = np.zeros(3, dtype=np.float32)
+        self._hover_kp = np.asarray([2, 2, 3], dtype=np.float32)
+        self._hover_ki = np.asarray([0.05, 0.05, 0.35], dtype=np.float32)
+        self._hover_kd = np.asarray([0.5, 0.5, 1.2], dtype=np.float32)
+        self._stop_mode = False
         # Attitude action scaling must match training (train_nav_rl.AttitudeAction / Args).
         if self._control_mode == "attitude":
             params = load_params("so_rpy", config.sim.drone_model)
@@ -42,6 +54,9 @@ class NavRLController(Controller):
             self._thrust_max = float(params["thrust_max"]) * 4.0
             self._max_angle = float(getattr(config.controller, "max_angle", Args.max_angle))
             self._max_yaw = float(getattr(config.controller, "max_yaw", Args.max_yaw))
+            self._hover_mass = float(params["mass"])
+            self._hover_g = float(-params["gravity_vec"][-1])
+            self._hover_thrust = float(self._hover_mass * self._hover_g)
         act_dim = 4 if self._control_mode == "attitude" else 13
         self._act_dim = act_dim
         self._n_nearest_obstacles = int(getattr(config.controller, "n_nearest_obstacles", 2))
@@ -93,9 +108,9 @@ class NavRLController(Controller):
         self._t = 0
         self._dbg = None
         try:
-            from lsy_drone_racing.debug_ui.publisher import get_publisher
+            from lsy_drone_racing.debug_ui.publisher import get_bridge
 
-            self._dbg = get_publisher()
+            self._dbg = get_bridge()
         except Exception:  # noqa: BLE001 - the debug UI must never break the controller.
             self._dbg = None
 
@@ -301,6 +316,67 @@ class NavRLController(Controller):
         if int(np.asarray(obs["target_gate"])) < 0:
             self._finished = True
 
+        if self._dbg is not None:
+            self._stop_mode = self._dbg.stop_requested()
+
+        if self._stop_mode:
+            pos = np.asarray(obs["pos"], dtype=np.float32)
+            vel = np.asarray(obs["vel"], dtype=np.float32)
+            yaw_now = float(R.from_quat(obs["quat"]).as_euler("xyz")[-1])
+            if self._hover_pos_sp is None or self._hover_yaw_sp is None:
+                self._hover_pos_sp = pos.copy()
+                self._hover_yaw_sp = yaw_now
+                self._hover_i[:] = 0.0
+
+            err = self._hover_pos_sp - pos
+            derr = -vel
+            self._hover_i = np.clip(self._hover_i + err * (1.0 / float(self._config.env.freq)), -2.0, 2.0)
+            acc_cmd = self._hover_kp * err + self._hover_ki * self._hover_i + self._hover_kd * derr
+            yaw = float(self._hover_yaw_sp)
+
+            if self._control_mode == "attitude":
+                g = max(float(self._hover_g), 1e-6)
+                ax, ay, az = acc_cmd.astype(float)
+                pitch = np.clip((ax * np.cos(yaw) + ay * np.sin(yaw)) / g, -0.45, 0.45)
+                roll = np.clip((ax * np.sin(yaw) - ay * np.cos(yaw)) / g, -0.45, 0.45)
+                thrust = float(
+                    np.clip(
+                        self._hover_thrust + self._hover_mass * az,
+                        0.2 * self._hover_thrust,
+                        2.2 * self._hover_thrust,
+                    )
+                )
+                command = np.asarray([roll, pitch, yaw, thrust], dtype=np.float32)
+            else:
+                command = np.asarray(
+                    [
+                        self._hover_pos_sp[0],
+                        self._hover_pos_sp[1],
+                        self._hover_pos_sp[2],
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        yaw,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
+                    dtype=np.float32,
+                )
+
+            if self._dbg is not None:
+                self._dbg.publish(self._t, obs, command, self._prev_action)
+            self._t += 1
+            return command
+
+        if self._hover_pos_sp is not None:
+            self._hover_pos_sp = None
+            self._hover_yaw_sp = None
+            self._hover_i[:] = 0.0
+
         # Build the observation with the current previous action (a_{t-1}) before stepping the policy.
         obs_tensor = self._obs_tensor(obs).unsqueeze(0)
         with torch.no_grad():
@@ -341,3 +417,7 @@ class NavRLController(Controller):
         self._finished = False
         self._prev_action = np.zeros(self._act_dim, dtype=np.float32)
         self._t = 0
+        self._hover_pos_sp = None
+        self._hover_yaw_sp = None
+        self._hover_i[:] = 0.0
+        self._stop_mode = False
