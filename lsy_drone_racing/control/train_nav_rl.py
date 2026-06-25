@@ -76,6 +76,7 @@ class Args:
     max_angle: float = float(np.pi / 2)  # rad, max commanded roll/pitch
     max_yaw: float = float(np.pi / 2)  # rad, max commanded yaw 
     n_nearest_obstacles: int = 2
+    progress_obs: bool = True  # append normalized passed-gate fraction (target_gate / n_gates) to the observation
     checkpoint_every_iterations: int = 10
     episode_step_limit: int = 1500
 
@@ -235,8 +236,8 @@ def _nearest_obstacle_features(obs: dict[str, Array], n_nearest: int) -> Array:
     return jp.concatenate([nearest, visited], axis=-1).reshape(obstacle_delta_body.shape[0], -1)
 
 
-@partial(jax.jit, static_argnames=("n_nearest_obstacles",))
-def build_navigation_features(obs: dict[str, Array], n_nearest_obstacles: int) -> Array:
+@partial(jax.jit, static_argnames=("n_nearest_obstacles", "include_progress"))
+def build_navigation_features(obs: dict[str, Array], n_nearest_obstacles: int, include_progress: bool = False) -> Array:
     """Build a compact navigation observation from the privileged environment state."""
     obs = _normalize_obs(obs)
     gate_delta_world, gate_delta_body, gate_quat_rel = _target_gate_metrics(obs)
@@ -244,9 +245,19 @@ def build_navigation_features(obs: dict[str, Array], n_nearest_obstacles: int) -
     # avoid the quaternion double-cover ambiguity (matches the Swift paper's observation design).
     gate_rotmat_rel = _quat_to_rotmat(gate_quat_rel)
     nearest_obstacles = _nearest_obstacle_features(obs, n_nearest_obstacles)
-    # Progress is encoded by visited_ratio; the raw target-gate index is dropped (poor as a feature).
+    # gates_visited is a *sensed* fraction (within sensor_range), not a passed fraction.
     visited_ratio = jp.mean(obs["gates_visited"].astype(jp.float32), axis=-1, keepdims=True)
-    return jp.concatenate([gate_delta_world, gate_delta_body, gate_rotmat_rel, obs["vel"], obs["ang_vel"], nearest_obstacles, visited_ratio], axis=-1)
+    feats = [gate_delta_world, gate_delta_body, gate_rotmat_rel, obs["vel"], obs["ang_vel"], nearest_obstacles, visited_ratio]
+    if include_progress:
+        # Fraction of gates already passed: target_gate is the index of the gate being flown to (=
+        # number passed), normalized to [0, 1]; the post-finish sentinel (-1) maps to 1.0. Unlike
+        # visited_ratio this is a true completion-progress signal, which helps the critic predict the
+        # terminal success bonus and lets the actor modulate behavior near the finish.
+        target_gate = obs["target_gate"]
+        n_gates = obs["gates_pos"].shape[1]
+        progress = jp.where(target_gate < 0, n_gates, target_gate).astype(jp.float32) / n_gates
+        feats.append(progress[:, None])
+    return jp.concatenate(feats, axis=-1)
 
 
 @jax.jit
@@ -289,16 +300,17 @@ def compute_navigation_reward(
 class NavigationObservation(VectorObservationWrapper):
     """Reduce the full environment observation to a compact navigation feature vector."""
 
-    def __init__(self, env: VectorEnv, n_nearest_obstacles: int = 2):
+    def __init__(self, env: VectorEnv, n_nearest_obstacles: int = 2, include_progress: bool = False):
         super().__init__(env)
         self.n_nearest_obstacles = n_nearest_obstacles
-        sample = build_navigation_features(race_obs(env.unwrapped.data), self.n_nearest_obstacles)
+        self.include_progress = include_progress
+        sample = build_navigation_features(race_obs(env.unwrapped.data), self.n_nearest_obstacles, self.include_progress)
         feature_dim = int(sample.shape[-1])
         self.single_observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(feature_dim,), dtype=np.float32)
         self.observation_space = batch_space(self.single_observation_space, self.num_envs)
 
     def observations(self, observations: dict[str, Array]) -> Array:
-        return build_navigation_features(observations, self.n_nearest_obstacles)
+        return build_navigation_features(observations, self.n_nearest_obstacles, self.include_progress)
 
 
 class PrevAction(VectorObservationWrapper):
@@ -504,7 +516,7 @@ def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str 
         env, gate_progress_coef=args.gate_progress_coef, gate_pass_bonus=args.gate_pass_bonus, success_bonus=args.success_bonus, crash_penalty=args.crash_penalty
     )
     env = ActionPenalty(env, act_coef=args.act_coef, d_act_main_coef=args.d_act_main_coef, d_act_aux_coef=args.d_act_aux_coef, control_mode=control_mode)
-    env = NavigationObservation(env, n_nearest_obstacles=args.n_nearest_obstacles)
+    env = NavigationObservation(env, n_nearest_obstacles=args.n_nearest_obstacles, include_progress=args.progress_obs)
     env = PrevAction(env)
     env = JaxToTorch(env, torch_device)
     return env

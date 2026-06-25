@@ -45,6 +45,7 @@ class NavRLController(Controller):
         act_dim = 4 if self._control_mode == "attitude" else 13
         self._act_dim = act_dim
         self._n_nearest_obstacles = int(getattr(config.controller, "n_nearest_obstacles", 2))
+        self._include_progress = bool(getattr(config.controller, "progress_obs", Args.progress_obs))
         # Single previous action a_{t-1} appended to the observation (matches train_nav_rl.PrevAction).
         self._prev_action = np.zeros(act_dim, dtype=np.float32)
 
@@ -54,6 +55,7 @@ class NavRLController(Controller):
         ckpt_args = self._extract_args(checkpoint)
         if ckpt_args is not None:
             self._n_nearest_obstacles = int(ckpt_args.get("n_nearest_obstacles", self._n_nearest_obstacles))
+            self._include_progress = bool(ckpt_args.get("progress_obs", self._include_progress))
             obs_dim = int(self._obs_tensor(obs).shape[-1])
         arch = checkpoint.get("arch")
         if isinstance(arch, dict) and arch.get("obs_shape") is not None:
@@ -192,7 +194,7 @@ class NavRLController(Controller):
         """Compute the compact navigation feature vector for the current observation."""
         obs_jax = {k: np.asarray(v)[None, ...] for k, v in obs.items()}
         features = build_navigation_features(
-            obs_jax, n_nearest_obstacles=self._n_nearest_obstacles
+            obs_jax, n_nearest_obstacles=self._n_nearest_obstacles, include_progress=self._include_progress
         )
         return np.array(features[0], copy=True, dtype=np.float32)
 
