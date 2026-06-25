@@ -23,10 +23,10 @@ from crazyflow.sim.visualize import draw_line, draw_points
 from drone_models.core import load_params
 from drone_models.so_rpy import symbolic_dynamics_euler
 from drone_models.utils.rotation import ang_vel2rpy_rates
-from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.control import Controller
+from lsy_drone_racing.control.three_b_one_s_controller import make_planner
 
 if TYPE_CHECKING:
     from crazyflow import Sim
@@ -66,11 +66,11 @@ class AttitudeMPC(Controller):
     # Maximum displacement applied to any single reference point.
     _APF_MAX_DISP: float = 0.3    # metres
 
-    # ALT VERSION: LARGE OBSTACLES WITH SMALL GAIN - BAD
-    # _APF_RADIUS: float = 0.1
-    # _APF_GATE_RADIUS: float = 0.5
-    # _APF_K_REP: float = 0.0007
-    # _APF_MAX_DISP: float = 0.5
+    # VASEK VERSION: RE-ADJUST WEIGHTS
+    _APF_RADIUS: float = 0.1
+    _APF_GATE_RADIUS: float = 0.1
+    _APF_K_REP: float = 0.03
+    _APF_MAX_DISP: float = 0.1
 
     # --- Gate geometry --------------------------------------------------------
     # Half-width of the outer gate frame (full outer size = 0.72 m).
@@ -85,30 +85,21 @@ class AttitudeMPC(Controller):
         self._N = 23
         self._dt = 1 / config.env.freq
 
-        start_pos = obs["pos"]
-        waypoints = np.array(
-            [
-                start_pos,
-                [-1.0, 0.75, 0.4],
-                [0.3, 0.35, 0.7],
-                [1.3, -0.15, 0.9],
-                [0.85, 0.85, 1.2],
-                [-0.5, -0.05, 0.7],
-                [-1.2, -0.2, 0.8],
-                [-1.2, -0.2, 1.2],
-                [-0.0, -0.7, 1.2],
-                [0.5, -0.75, 1.2],
-            ]
+        self._planner = make_planner(freq=config.env.freq)
+        self._planner.replan(
+            start_pos=np.asarray(obs["pos"]).squeeze(),
+            first_gate=0,
+            gates_pos=np.asarray(obs["gates_pos"]),
+            gates_quat=np.asarray(obs["gates_quat"]),
+            obstacles_pos=np.asarray(obs["obstacles_pos"]),
+            optimize=True,
         )
-        self._t_total = 8
-
-        t = np.linspace(0, self._t_total, len(waypoints))
-        pos_spline = CubicSpline(t, waypoints)
-        vel_spline = pos_spline.derivative()
-        t_eval = np.linspace(0, self._t_total, int(config.env.freq * self._t_total))
-        self._waypoints_pos = pos_spline(t_eval)
-        self._waypoints_vel = vel_spline(t_eval)
-        self._waypoints_yaw = np.zeros(len(self._waypoints_pos))
+        self._t_total = self._planner.t_total
+        n_steps = int(np.ceil(self._t_total * config.env.freq))
+        t_eval = np.linspace(0, self._t_total, n_steps)
+        self._waypoints_pos = self._planner.spline(t_eval)
+        self._waypoints_vel = self._planner.spline.derivative(1)(t_eval)
+        self._waypoints_yaw = np.zeros(n_steps)
 
         params = load_params("so_rpy", config.sim.drone_model)
         self.drone_params = params
