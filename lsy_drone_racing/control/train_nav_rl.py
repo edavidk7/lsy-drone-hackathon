@@ -298,6 +298,15 @@ def make_envs(config: str = "level2.toml", num_envs: int = 256, jax_device: str 
     if args is None:
         args = Args.create()
     config_data = load_config(Path(__file__).parents[2] / "config" / config)
+    # Optional gates-only mode: an `[env] disable_obstacles = true` flag in the track config removes
+    # every obstacle from the course (no MuJoCo bodies, no contacts) and drops the obstacle features
+    # from the observation. We force n_nearest_obstacles to 0 on the args object so the value saved in
+    # the checkpoint matches the obs layout actually trained (keeps inference reconstruction correct).
+    disable_obstacles = bool(getattr(config_data.env, "disable_obstacles", False))
+    if disable_obstacles:
+        config_data.env.track.obstacles = []
+        args.n_nearest_obstacles = 0
+        print("Obstacles disabled for this run: gates-only course (n_nearest_obstacles forced to 0).")
     env = VecDroneRaceEnv(
         num_envs=num_envs,
         freq=config_data.env.freq,

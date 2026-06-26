@@ -162,7 +162,8 @@ def build_random_track_fn(
     gates_z = jp.array(gates_z, dtype=jp.float32)
     obstacles_z = jp.array(obstacles_z, dtype=jp.float32)
     N = gates_z.shape[0]
-    assert obstacles_z.shape[0] == N, "Number of gates and obstacles must be the same."
+    n_obstacles = obstacles_z.shape[0]
+    assert n_obstacles in (0, N), "Number of obstacles must equal the number of gates, or be 0 (gates-only course)."
 
     xmin, ymin = jp.array(pos_limit_low[:2], dtype=jp.float32) + border_margin
     xmax, ymax = jp.array(pos_limit_high[:2], dtype=jp.float32) - border_margin
@@ -278,7 +279,10 @@ def build_random_track_fn(
             [jp.zeros_like(half_yaw), jp.zeros_like(half_yaw), jp.sin(half_yaw), jp.cos(half_yaw)],
             axis=-1,
         )
-        obstacles_pos = jp.concatenate([obstacles, obstacles_z[:, None]], axis=-1)
+        # Gates-only tracks (n_obstacles == 0) keep the identical gate layout but emit no obstacles;
+        # the obstacle-placement work above is computed with its own RNG keys and simply dropped, so
+        # gate positions match the with-obstacles layout exactly.
+        obstacles_pos = jp.concatenate([obstacles[:n_obstacles], obstacles_z[:, None]], axis=-1)
 
         return gates_pos, gates_quat, obstacles_pos
 

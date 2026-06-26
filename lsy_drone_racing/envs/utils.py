@@ -41,7 +41,9 @@ def load_track(track: ConfigDict) -> tuple[ConfigDict, ConfigDict, ConfigDict]:
         "nominal_pos": gate_pos.copy(),
         "nominal_quat": gate_quat.copy(),
     }
-    obstacle_pos = np.array([o["pos"] for o in track.obstacles], dtype=np.float32)
+    # reshape(-1, 3) keeps the trailing coordinate axis when the track has no obstacles, so an empty
+    # obstacle list yields shape (0, 3) rather than (0,) (which would break the downstream tiling).
+    obstacle_pos = np.array([o["pos"] for o in track.obstacles], dtype=np.float32).reshape(-1, 3)
     obstacles = {"pos": obstacle_pos, "nominal_pos": obstacle_pos.copy()}
     drones = {
         k: np.array([drone.get(k) for drone in track.drones], dtype=np.float32)

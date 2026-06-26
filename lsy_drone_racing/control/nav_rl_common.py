@@ -35,8 +35,8 @@ class Args:
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
     continue_run: bool = False  # with resume_from: true-continue (keep obs_rms, log-std, optimizer state) instead of a transfer warm-start (which resets them)
 
-    total_timesteps: int = 50_000_000
-    learning_rate: float = 3e-4  # 1.5e-3 works on this problem too
+    total_timesteps: int = 200_000_000
+    learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
     num_envs: int = 2048
     num_steps: int = 16
     anneal_lr: bool = True
@@ -202,6 +202,9 @@ def _nearest_obstacle_features(obs: dict[str, Array], n_nearest: int) -> Array:
       sensor_range its reported position is the nominal (pre-randomization) guess and snaps to the
       true position once sensed; the flag lets the policy distinguish a confirmed pole from a guess.
     """
+    if n_nearest == 0:
+        # Obstacles disabled (gates-only course): contribute no obstacle features.
+        return jp.zeros((obs["pos"].shape[0], 0), dtype=jp.float32)
     obstacle_delta_world = obs["obstacles_pos"] - obs["pos"][:, None, :]
     obstacle_delta_body = _rotate_world_to_body(obstacle_delta_world.reshape(-1, 3), jp.repeat(obs["quat"], obstacle_delta_world.shape[1], axis=0)).reshape(
         obstacle_delta_world.shape
