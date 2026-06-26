@@ -477,8 +477,11 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
         critic_grad_norm_pre = 0.0
         critic_grad_norm_post = 0.0
         if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            optimizer.param_groups[0]["lr"] = max(args.min_learning_rate, frac * args.learning_rate)
+            # Linear anneal from learning_rate to min_learning_rate over the first lr_anneal_frac of
+            # training, then hold at the floor. Smaller lr_anneal_frac => steeper slope, hits min sooner.
+            progress = (iteration - 1.0) / args.num_iterations
+            t = min(progress / args.lr_anneal_frac, 1.0) if args.lr_anneal_frac > 0 else 1.0
+            optimizer.param_groups[0]["lr"] = args.learning_rate + (args.min_learning_rate - args.learning_rate) * t
 
         for step in range(args.num_steps):
             global_step += args.num_envs

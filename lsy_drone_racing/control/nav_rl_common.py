@@ -28,29 +28,30 @@ class Args:
 
     seed: int = 42
     cuda: bool = True
-    jax_device: str = "cpu"
+    jax_device: str = "gpu"
     wandb_project_name: str = "ADR-PPO-Navigation"
     wandb_entity: str | None = None
-    config: str = "level0.toml"
+    config: str = "level_competition_train.toml"
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
 
-    total_timesteps: int = 200_000_000
+    total_timesteps: int = 1_000_000_000
     learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
     num_envs: int = 2048
-    num_steps: int = 16
+    num_steps: int = 32
     anneal_lr: bool = True
     min_learning_rate: float = 5e-5
+    lr_anneal_frac: float = 1.0  # fraction of training over which LR anneals down to min_learning_rate; held at the floor afterwards (e.g. 0.5 = reach min at the halfway point)
     gamma: float = 0.99
     gae_lambda: float = 0.95
     num_minibatches: int = 8
-    update_epochs: int = 10
+    update_epochs: int = 4
     norm_adv: bool = True
     clip_coef: float = 0.23  # 0.23 also worked well
     clip_vloss: bool = True
     ent_coef: float = 0.02
     vf_coef: float = 0.7
     max_grad_norm: float = 1.0
-    target_kl: float | None = 0.05  # can be none
+    target_kl: float | None = None  # can be none
 
     actor_hdim: int = 256
     critic_hdim: int = 256
@@ -58,7 +59,7 @@ class Args:
     gate_pass_bonus: float = 10.0
     success_bonus: float = 15.0
     crash_penalty: float = 5.0
-    init_logstd: float = -0.1
+    init_logstd: float = -1
     init_logstd_last: float = 1.0
     act_coef: float = 0.01  # energy penalty on the collective-thrust action channel only
     d_act_main_coef: float = 0.1  # jerk penalty on the roll/pitch/yaw action channels
@@ -82,6 +83,8 @@ class Args:
     @staticmethod
     def create(**kwargs: Any) -> "Args":
         args = Args(**kwargs)
+        if not 0.0 < args.lr_anneal_frac <= 1.0:
+            raise ValueError(f"lr_anneal_frac must be in (0, 1], got {args.lr_anneal_frac}")
         args.batch_size = int(args.num_envs * args.num_steps)
         args.minibatch_size = int(args.batch_size // args.num_minibatches)
         args.num_iterations = max(1, args.total_timesteps // args.batch_size)
