@@ -354,9 +354,22 @@ def clip_grad_group(parameters: list[nn.Parameter], max_norm: float) -> tuple[fl
     return pre_clip, post_clip
 
 
-def build_checkpoint_payload(agent: nn.Module, args: Args, obs_shape: tuple[int, ...], action_shape: tuple[int, ...]) -> dict[str, Any]:
-    """Serialize model weights together with the training args and architecture metadata."""
-    return {
+def build_checkpoint_payload(
+    agent: nn.Module,
+    args: Args,
+    obs_shape: tuple[int, ...],
+    action_shape: tuple[int, ...],
+    optimizer: optim.Optimizer | None = None,
+    iteration: int | None = None,
+    global_step: int | None = None,
+) -> dict[str, Any]:
+    """Serialize model weights together with the training args and architecture metadata.
+
+    When ``optimizer``/``iteration``/``global_step`` are supplied they are stored too, so a later
+    ``--continue_run`` can restore the AdamW moment estimates and resume the step counter rather than
+    restarting the optimizer cold.
+    """
+    payload = {
         "state_dict": agent.state_dict(),
         "args": asdict(args),
         "arch": {
@@ -368,6 +381,13 @@ def build_checkpoint_payload(agent: nn.Module, args: Args, obs_shape: tuple[int,
             "init_logstd_last": None if args.init_logstd_last is None else float(args.init_logstd_last),
         },
     }
+    if optimizer is not None:
+        payload["optimizer"] = optimizer.state_dict()
+    if iteration is not None:
+        payload["iteration"] = int(iteration)
+    if global_step is not None:
+        payload["global_step"] = int(global_step)
+    return payload
 
 
 def select_torch_device(use_cuda: bool) -> torch.device:
@@ -386,7 +406,10 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
     print("Training on device:", device, "| Environment device:", jax_device)
     envs = make_envs(config=args.config, num_envs=args.num_envs, jax_device=jax_device, torch_device=device, args=args)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
-    checkpoint_payload = lambda: build_checkpoint_payload(agent, args, envs.single_observation_space.shape, envs.single_action_space.shape)
+    checkpoint_payload = lambda: build_checkpoint_payload(
+        agent, args, envs.single_observation_space.shape, envs.single_action_space.shape,
+        optimizer=optimizer, iteration=iteration, global_step=global_step,
+    )
 
     agent = Agent(
         envs.single_observation_space.shape,
@@ -396,6 +419,7 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
         init_logstd=args.init_logstd,
         init_logstd_last=args.init_logstd_last,
     ).to(device)
+    continue_ckpt = None
     if args.resume_from:
         resume_path = Path(args.resume_from)
         if not resume_path.is_absolute():
@@ -410,24 +434,38 @@ def train_ppo(args: Args, model_path: Path | None, device: torch.device, jax_dev
                 f"obs/action dims and architecture (actor_hdim={args.actor_hdim}, "
                 f"critic_hdim={args.critic_hdim})."
             ) from exc
-        # load_state_dict also restored obs_rms (mean/var/count). Its count carries the source run's
-        # full sample size, which would freeze observation normalization at the source-env statistics
-        # and stop it adapting to the env now being trained on (e.g. level0 -> level2, where gate and
-        # obstacle features have a wider, shifted distribution). Reset it so the normalizer
-        # recalibrates from the current env's observations (update() runs before the first forward
-        # pass each step, so there is no normalization shock).
-        agent.obs_rms.reset()
-        # load_state_dict also restored actor_logstd, i.e. the source policy's (often converged,
-        # near-deterministic) exploration level. Inheriting it leaves a resume on a harder task
-        # exploration-starved, which collapses to a deterministic local optimum (grad norm and
-        # clipfrac -> 0). Reset it to the configured initial exploration so the warm-started weights
-        # can still explore.
-        agent.reset_logstd(args.init_logstd, args.init_logstd_last)
-        print(
-            f"Resumed agent weights from {resume_path} "
-            f"(obs normalization + action log-std reset to re-adapt and re-explore)"
-        )
+        if args.continue_run:
+            # True-continue (same task, e.g. forking a mid-run checkpoint to branch the LR): keep the
+            # restored obs_rms and actor_logstd as-is, and restore the optimizer state below, so this
+            # is a seamless extension of the source policy rather than a transfer warm-start. Only the
+            # confounds the warm-start path deliberately injects (normalizer reset, exploration reset,
+            # cold optimizer) are avoided; the step counter starts fresh so this leg gets its own budget.
+            continue_ckpt = ckpt
+            print(f"Continuing run from {resume_path} (obs_rms, action log-std, and optimizer state preserved)")
+        else:
+            # load_state_dict also restored obs_rms (mean/var/count). Its count carries the source run's
+            # full sample size, which would freeze observation normalization at the source-env statistics
+            # and stop it adapting to the env now being trained on (e.g. level0 -> level2, where gate and
+            # obstacle features have a wider, shifted distribution). Reset it so the normalizer
+            # recalibrates from the current env's observations (update() runs before the first forward
+            # pass each step, so there is no normalization shock).
+            agent.obs_rms.reset()
+            # load_state_dict also restored actor_logstd, i.e. the source policy's (often converged,
+            # near-deterministic) exploration level. Inheriting it leaves a resume on a harder task
+            # exploration-starved, which collapses to a deterministic local optimum (grad norm and
+            # clipfrac -> 0). Reset it to the configured initial exploration so the warm-started weights
+            # can still explore.
+            agent.reset_logstd(args.init_logstd, args.init_logstd_last)
+            print(
+                f"Resumed agent weights from {resume_path} "
+                f"(obs normalization + action log-std reset to re-adapt and re-explore)"
+            )
     optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    if continue_ckpt is not None and "optimizer" in continue_ckpt:
+        optimizer.load_state_dict(continue_ckpt["optimizer"])
+        print("Restored optimizer (AdamW moment) state from continue checkpoint.")
+    elif continue_ckpt is not None:
+        print("Continue checkpoint has no saved optimizer state; AdamW moments start cold (pre-continue checkpoints).")
     base_dir = model_path.parent if model_path is not None else Path(__file__).parent
     if wandb_enabled and wandb.run is not None and wandb.run.name:
         run_dir_name = _safe_run_name(wandb.run.name)

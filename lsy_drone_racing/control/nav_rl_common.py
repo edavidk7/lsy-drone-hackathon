@@ -33,6 +33,7 @@ class Args:
     wandb_entity: str | None = None
     config: str = "level_competition_train.toml"
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
+    continue_run: bool = False  # with resume_from: true-continue (keep obs_rms, log-std, optimizer state) instead of a transfer warm-start (which resets them)
 
     total_timesteps: int = 1_000_000_000
     learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
