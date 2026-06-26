@@ -6,7 +6,7 @@
 [controller]
 file = "state_controller.py" # Put your controller file name here. Specifying a controller as argument to scripts will override this setting. Controllers are located in `lsy_drone_racing/control/`
 # model_path = "quiet-elevator-20/ppo_nav_drone_racing.ckpt"
-model_path = "ppo_nav_drone_racing.ckpt"
+model_path = "ppo-nav-training-vivid-sponge-43/ppo_nav_drone_racing.ckpt"
 
 [deploy]
 ### Settings only relevant for deployment

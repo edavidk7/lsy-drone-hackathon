@@ -35,13 +35,13 @@ class Args:
     resume_from: str | None = None  # path to a checkpoint (.ckpt) to resume model weights from
     continue_run: bool = False  # with resume_from: true-continue (keep obs_rms, log-std, optimizer state) instead of a transfer warm-start (which resets them)
 
-    total_timesteps: int = 1_000_000_000
-    learning_rate: float = 1.5e-3  # 1.5e-3 works on this problem too
+    total_timesteps: int = 50_000_000
+    learning_rate: float = 3e-4  # 1.5e-3 works on this problem too
     num_envs: int = 2048
-    num_steps: int = 32
+    num_steps: int = 16
     anneal_lr: bool = True
-    min_learning_rate: float = 5e-5
-    lr_anneal_frac: float = 1.0  # fraction of training over which LR anneals down to min_learning_rate; held at the floor afterwards (e.g. 0.5 = reach min at the halfway point)
+    min_learning_rate: float = 1e-5
+    lr_anneal_frac: float = 0.8  # fraction of training over which LR anneals down to min_learning_rate; held at the floor afterwards (e.g. 0.5 = reach min at the halfway point)
     gamma: float = 0.99
     gae_lambda: float = 0.95
     num_minibatches: int = 8
